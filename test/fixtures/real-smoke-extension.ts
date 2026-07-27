@@ -1,19 +1,19 @@
 import { writeFile } from "node:fs/promises";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { SubagentsRpcV1Kernel } from "../../src/adapters/subagents-rpc-v1.ts";
+import { PiSdkKernel } from "../../src/adapters/pi-sdk-kernel.ts";
 
 const RESULT_PATH = "/tmp/campaign-real-smoke-result.txt";
 const OUTPUT_PATH = "/tmp/campaign-real-smoke-output.txt";
 
 export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
-    const kernel = new SubagentsRpcV1Kernel(pi.events);
+    const kernel = new PiSdkKernel();
     let result: string;
     try {
       const ping = await kernel.ping();
       const run = await kernel.spawn({
         agent: "scout",
-        task: "Return exactly CAMPAIGN_RPC_SMOKE_OK. Do not use tools.",
+        task: "Return exactly CAMPAIGN_NATIVE_SMOKE_OK. Do not use tools.",
         cwd: ctx.cwd,
         outputPath: OUTPUT_PATH,
       });
@@ -22,8 +22,8 @@ export default function (pi: ExtensionAPI) {
         const status = await kernel.status(run);
         if (status.state === "complete") {
           const output = String(status.output ?? "").trim();
-          result = output === "CAMPAIGN_RPC_SMOKE_OK"
-            ? `OK rpc=${ping.version} output=exact`
+          result = output === "CAMPAIGN_NATIVE_SMOKE_OK"
+            ? `OK native=${ping.version} output=exact`
             : `FAILED unexpected output ${JSON.stringify(output.slice(0, 500))}`;
           break;
         }
@@ -37,5 +37,5 @@ export default function (pi: ExtensionAPI) {
     }
     await writeFile(RESULT_PATH, result);
   });
-  pi.registerCommand("campaign-smoke", { description: "Run the Campaign RPC smoke fixture", handler: async () => {} });
+  pi.registerCommand("campaign-smoke", { description: "Run the Campaign native-kernel smoke fixture", handler: async () => {} });
 }

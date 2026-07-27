@@ -214,7 +214,7 @@ export class CampaignSupervisor {
       const perform = async () => {
         this.assertWithinCampaignDeadline();
         const assignmentTimeout = this.remainingCampaignMs();
-        const run = await this.kernel.spawn({ agent: node.agent, task: prompt, cwd: this.state.cwd, phase: node.label ?? node.id, label: node.id, ...(selectedModel ? { model: selectedModel } : {}), ...(selectedThinking ? { thinking: selectedThinking } : {}), worktree: node.isolation === "worktree", outputPath: join(this.store.runDir, "subagents", `${fileId(instanceId)}.txt`), ...(assignmentTimeout !== undefined ? { timeoutMs: assignmentTimeout } : {}), ...(node.outputSchema ? { outputSchema: node.outputSchema } : {}), acceptance: node.acceptance ?? { level: "none", reason: "Campaign captures assignment output and validates it with first-class campaign gates." } });
+        const run = await this.kernel.spawn({ agent: node.agent, task: prompt, cwd: this.state.cwd, phase: node.label ?? node.id, label: node.id, capabilities: node.capabilities, ...(selectedModel ? { model: selectedModel } : {}), ...(selectedThinking ? { thinking: selectedThinking } : {}), worktree: node.isolation === "worktree", outputPath: join(this.store.runDir, "assignments", `${fileId(instanceId)}.txt`), ...(assignmentTimeout !== undefined ? { timeoutMs: assignmentTimeout } : {}), ...(node.outputSchema ? { outputSchema: node.outputSchema } : {}), acceptance: node.acceptance ?? { level: "none", reason: "Campaign captures assignment output and validates it with first-class campaign gates." } });
         await this.store.append("node.started", { nodeId: instanceId, kernelRunId: run.id, asyncDir: run.asyncDir });
         const status = await this.waitForKernel(run, instanceId);
         await this.recordUsage(run.id, status);
@@ -255,7 +255,9 @@ export class CampaignSupervisor {
     const verifyId = `${instanceId}:verify`;
     await this.store.append("node.scheduled", { nodeId: verifyId, attempt: 1 });
     const originalPrompt = this.state.nodes[instanceId]?.promptOverride ?? String(resolveExpression(node.prompt, ctx));
-    const run = await this.kernel.spawn({ agent: "reviewer", task: `Verify whether this interrupted assignment already completed successfully without making changes. Assignment:\n${originalPrompt}\nReturn JSON only: {"complete": boolean, "output": any, "evidence": string}.`, cwd: this.state.cwd, phase: `Recover ${node.id}`, label: verifyId, outputPath: join(this.store.runDir, "subagents", `${fileId(verifyId)}.txt`) });
+    const task = `Verify whether this interrupted assignment already completed successfully without making changes. Assignment:\n${originalPrompt}\nReturn JSON only: {"complete": boolean, "output": any, "evidence": string}.`;
+    const decision = await this.routeSupport("reviewer", task, verifyId, []);
+    const run = await this.kernel.spawn({ agent: "reviewer", task, cwd: this.state.cwd, phase: `Recover ${node.id}`, label: verifyId, ...(decision ? { model: decision.model, thinking: decision.thinking } : {}), outputSchema: { type: "object", required: ["complete", "evidence"] }, outputPath: join(this.store.runDir, "assignments", `${fileId(verifyId)}.txt`) });
     await this.store.append("node.started", { nodeId: verifyId, kernelRunId: run.id, asyncDir: run.asyncDir });
     const status = await this.waitForKernel(run, verifyId);
     await this.recordUsage(run.id, status);
@@ -308,8 +310,10 @@ export class CampaignSupervisor {
         if (this.state.agentsStarted >= this.ir.limits.maxAgents) throw new Error(`Runtime maxAgents ${this.ir.limits.maxAgents} reached before gate repair.`);
         const repairId = `${instanceId}:repair:${attempt}`;
         await this.store.append("node.scheduled", { nodeId: repairId, attempt: 1 });
+        const repairTask = `Repair the failed campaign checkpoint '${node.id}'. Evidence:\n${JSON.stringify(result.evidence ?? result.error)}`;
+        const decision = await this.routeSupport("worker", repairTask, repairId, ["code-write", "tests"]);
         const perform = async () => {
-          const run = await this.kernel.spawn({ agent: "worker", task: `Repair the failed campaign checkpoint '${node.id}'. Evidence:\n${JSON.stringify(result.evidence ?? result.error)}`, cwd: this.state.cwd, phase: `Repair ${node.id}`, label: repairId, outputPath: join(this.store.runDir, "subagents", `${fileId(repairId)}.txt`) });
+          const run = await this.kernel.spawn({ agent: "worker", task: repairTask, cwd: this.state.cwd, phase: `Repair ${node.id}`, label: repairId, capabilities: ["code-write", "tests"], ...(decision ? { model: decision.model, thinking: decision.thinking } : {}), outputPath: join(this.store.runDir, "assignments", `${fileId(repairId)}.txt`) });
           await this.store.append("node.started", { nodeId: repairId, kernelRunId: run.id, asyncDir: run.asyncDir });
           const repair = await this.waitForKernel(run, repairId);
           await this.recordUsage(run.id, repair);
@@ -323,6 +327,9 @@ export class CampaignSupervisor {
     }
     await this.store.append("node.failed", { nodeId: instanceId, error: `Gate ${result.outcome} (${action.action})` });
     throw new Error(`Gate '${node.id}' ${result.outcome} (${action.action}).`);
+  }
+  private async routeSupport(agent: string, prompt: string, instanceId: string, capabilities: string[]): Promise<ModelDecision | undefined> {
+    return this.options.route?.({ id: instanceId, kind: "agent-task", agent, prompt, capabilities, recovery: capabilities.includes("code-write") ? "verify-before-retry" : "safe-retry" }, instanceId);
   }
   private async waitForKernel(run: KernelRun, nodeId: string) {
     while (true) {
@@ -349,7 +356,7 @@ export class CampaignSupervisor {
     }
   }
   private async localComplete(nodeId: string, output: unknown): Promise<unknown> { await this.store.append("node.completed", { nodeId, output }); return output; }
-  private outputPathFor(nodeId: string): string { return join(this.store.runDir, "subagents", `${fileId(nodeId)}.txt`); }
+  private outputPathFor(nodeId: string): string { return join(this.store.runDir, "assignments", `${fileId(nodeId)}.txt`); }
   private wasManuallyRetried(nodeId: string): boolean { return this.store.state.nodes[nodeId]?.status === "scheduled"; }
   private remainingCampaignMs(): number | undefined { return this.ir.limits.timeoutMs === undefined ? undefined : Math.max(0, this.state.createdAt + this.ir.limits.timeoutMs - Date.now()); }
   private assertWithinCampaignDeadline(): void { if ((this.remainingCampaignMs() ?? 1) <= 0) throw new Error(`Campaign timeout ${this.ir.limits.timeoutMs}ms exceeded.`); }
@@ -359,7 +366,7 @@ export class CampaignSupervisor {
   private async requireIsolationDowngrade(nodeId: string): Promise<void> {
     if (this.approvedIsolationDowngrades.has(nodeId)) return;
     const approved = await this.options.approveIsolationDowngrade?.(nodeId) ?? false;
-    if (!approved) throw new Error(`Node '${nodeId}' requires worktree isolation, but the active pi-subagents RPC backend cannot provide it.`);
+    if (!approved) throw new Error(`Node '${nodeId}' requires worktree isolation, but the active Campaign kernel cannot provide it.`);
     this.approvedIsolationDowngrades.add(nodeId);
   }
 

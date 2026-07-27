@@ -132,7 +132,7 @@ function campaignTools(runId: string, ctx: ExtensionContext, service: CampaignCo
 
 function textResult(text: string) { return { content: [{ type: "text" as const, text }], details: {} }; }
 function orchestratorPrompt(runId: string): string {
-  return `You are the dedicated control-plane orchestrator for Campaign ${runId}. The campaign—not the repository—is the first-class object in this conversation. Help the user understand live progress, failures, checkpoints, outputs, and next actions. Call campaign_status before making claims about current state. Use campaign_control only when the user explicitly asks for a mutation. Never edit repository files or run shell commands. Do not claim that pi-subagents RPC v1 supports native child steering, resume, or append-step; Campaign supports campaign-level pause, retry, stop-agent, and stop. Be concise and operational.`;
+  return `You are the dedicated control-plane orchestrator for Campaign ${runId}. The campaign—not the repository—is the first-class object in this conversation. Help the user understand live progress, failures, checkpoints, outputs, and next actions. Call campaign_status before making claims about current state. Use campaign_control only when the user explicitly asks for a mutation. Never edit repository files or run shell commands. Campaign owns assignment execution through Pi SDK sessions. Running assignment turns cannot be retroactively changed; use campaign-level pause, retry, stop-agent, and stop controls honestly. Be concise and operational.`;
 }
 
 function messagesToLines(messages: readonly unknown[]): OrchestratorLine[] {

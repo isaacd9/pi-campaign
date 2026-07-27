@@ -22,13 +22,13 @@ The plugin will:
 2. ask the smallest suitable routing model to choose a model and thinking level for campaign generation;
 3. generate a restricted TypeScript campaign program;
 4. compile and validate that program before execution;
-5. execute it in deterministic, persisted stages through `pi-subagents`;
+5. execute it in deterministic, persisted stages through Campaign-owned Pi SDK sessions;
 6. enforce first-class gates declared by the program;
 7. choose a model and thinking level separately for every agent task;
 8. survive Pi restarts and resume from durable checkpoints; and
 9. expose a full-screen `/campaign-inspect` TUI with live status, prompts, output, gates, costs, and controls.
 
-The campaign program—not the parent model's context—holds the plan, loops, branches, intermediate results, and stop conditions. The parent conversation receives concise milestones and the final result rather than every child transcript.
+The campaign program—not the parent model's context—holds the plan, loops, branches, intermediate results, and stop conditions. The parent conversation receives only compact footer status; milestones, assignment completions, transcripts, and final output remain in durable campaign state and the inspector.
 
 ## 2. Confirmed product decisions
 
@@ -36,7 +36,7 @@ The campaign program—not the parent model's context—holds the plan, loops, b
 - **Terminology:** this product uses **campaign**, **milestone**, and **assignment**. A first-class gate is shown to users as a **checkpoint**. “Dynamic workflows” appears only when naming the Claude Code reference feature.
 - **Reference experience:** Claude Code Ultracode and dynamic workflows: <https://code.claude.com/docs/en/workflows>
 - **Campaign language:** TypeScript.
-- **Execution kernel:** `pi-subagents` supplies child execution, fan-out, chains, controls, artifacts, acceptance checks, worktrees, and low-level recovery. Campaign adds a supervisory product layer instead of rebuilding those capabilities.
+- **Execution kernel:** Campaign owns assignment execution directly through public Pi SDK sessions. Campaign owns scheduling, fan-out, controls, lifecycle artifacts, usage projection, cancellation, and recovery; it does not depend on `pi-subagents`.
 - **Gates:** explicit, first-class program nodes. Automated and human gates are selected according to the campaign. Every campaign-level gate, including safety gates, can be overridden by the user.
 - **Model routing:** automatic. Normal use must not require the user to choose models or thinking levels.
 - **Routing prompt privacy:** the routing model may receive the full task and necessary context.
@@ -187,7 +187,7 @@ interface CampaignIR {
 
 ### 5.1 Node types
 
-- `agent-task`: one subagent invocation.
+- `agent-task`: one Campaign-native Pi SDK assignment session.
 - `sequence`: deterministic ordered children.
 - `parallel`: statically known concurrent children.
 - `map`: bounded dynamic fan-out over a schema-validated prior output.
@@ -238,7 +238,7 @@ interface GateNode {
 - `schema`: validate a prior output or artifact.
 - `artifact`: assert file existence, hash, diff limits, or content rules.
 - `review`: run an independent reviewer and require a structured verdict.
-- `acceptance`: map to `pi-subagents` acceptance criteria/verification.
+- `acceptance`: validate a prior Campaign assignment and its persisted evidence.
 - `approval`: ask the user to approve a stage or decision.
 - `safety`: identify a risky operation or capability transition.
 - `budget`: enforce token, cost, time, agent, or retry limits.
@@ -263,13 +263,13 @@ The plugin cannot and should not override restrictions owned outside the campaig
 
 ### 7.1 State-machine loop
 
-The Campaign supervisor owns milestone-level transitions; an LLM does not decide the next transition during normal execution. It delegates single assignments, chains, static parallel groups, and bounded dynamic fan-out to `pi-subagents` rather than recreating its process scheduler.
+The Campaign supervisor owns milestone-level transitions; an LLM does not decide the next transition during normal execution. Campaign schedules every sequence, static parallel group, bounded dynamic fan-out, branch, and loop itself, while the native kernel executes one assignment per Pi SDK session.
 
 For each runnable Campaign node it:
 
 1. resolves input references and templates;
 2. routes the assignment to a model/thinking level;
-3. groups work that `pi-subagents` can execute natively;
+3. identifies bounded independent work that Campaign may schedule concurrently;
 4. persists `node.scheduled` before side effects;
 5. submits the native run to the kernel;
 6. records kernel lifecycle and artifact references in the Campaign event log;
@@ -278,7 +278,7 @@ For each runnable Campaign node it:
 9. persists the resulting state; and
 10. advances only nodes made runnable by that persisted transition.
 
-Campaign-specific supervision is limited to features the kernel does not provide: generalized checkpoints, cross-run branches and bounded loops, model routing, saved TypeScript programs, user overrides, and the Campaign Console.
+The kernel remains deliberately small: one assignment session, lifecycle projection, budgets, and cancellation. Campaign owns every workflow-level decision.
 
 ### 7.2 Single-writer policy
 
@@ -286,7 +286,7 @@ Campaign-specific supervision is limited to features the kernel does not provide
 - Only one writer may touch the active worktree at a time.
 - Concurrent writers require isolated git worktrees.
 - Worktree results merge through a serialized merge node followed by validation gates.
-- The compiler and Campaign supervisor enforce writer rules while delegating worktree creation and isolated execution to `pi-subagents`.
+- The compiler and Campaign supervisor enforce writer rules; until native worktree support lands, isolated writer fan-out requires explicit serialized-downgrade approval.
 
 ### 7.3 Idempotency and crash recovery
 
@@ -301,69 +301,39 @@ Writer tasks default to `verify-before-retry`; read-only tasks default to `safe-
 
 On restart, the supervisor replays the Campaign event log and reconciles it with the kernel's persisted status and artifacts. A node persisted as started but not finished becomes `interrupted`, never silently `completed`. The recovery policy then determines the next transition. Completed kernel results are reused rather than rerun.
 
-## 8. `pi-subagents` execution kernel
+## 8. Campaign-native Pi SDK execution kernel
 
 ### 8.1 Division of responsibility
 
-Reuse these existing `pi-subagents` capabilities directly:
+Campaign owns the workflow scheduler, bounded fan-out, branches, loops, gates, routing, persistence, recovery, and UI. The kernel therefore needs to execute exactly one assignment at a time; it does not need a second chain or graph scheduler.
 
-- single agents, sequential chains, static parallel groups, and structured dynamic fan-out;
-- async execution and concurrency limits;
-- phase labels and execution-graph snapshots;
-- per-agent model, thinking, fallback, skill, context, output, and acceptance settings;
-- worktree isolation and the existing single-writer safety guidance;
-- status, transcript, token, cost, tool, control, and acceptance artifacts;
-- interrupt, stop, resume, steer, and append-step behavior where exposed; and
-- persisted child sessions and result recovery.
+Each assignment gets a dedicated public Pi SDK `AgentSession` with:
 
-Campaign should not create a second child-process runner, chain executor, worktree manager, transcript format, or token/cost ledger. Its adapter translates Campaign assignments into kernel calls and projects kernel artifacts into Campaign state.
+- an explicit model and thinking level;
+- a capability-derived built-in tool allowlist;
+- a campaign-specific system prompt and assignment prompt;
+- a private persistent session directory under the campaign run;
+- turn, tool, and wall-clock budget enforcement;
+- structured final-output parsing;
+- token and cost projection from assistant-message usage;
+- abort/stop control; and
+- no parent-chat messages or completion notifications.
 
-Campaign remains responsible for the restricted TypeScript format, generalized checkpoints, cross-run branches/loops, automatic model selection, durable campaign-level replay, overrides, and the Campaign Console.
+### 8.2 Durable lifecycle boundary
 
-### 8.2 Use the stable in-process RPC boundary
+Before starting an SDK session, Campaign persists `node.scheduled`; after kernel creation it persists the runtime ID and artifact directory. The native kernel atomically writes `campaignLifecycleArtifactVersion: 1` status snapshots containing state, current tool/path, recent output, model, thinking, usage, session path, errors, and final output.
 
-`pi-subagents` exposes a stable v1 event-bus RPC:
+An SDK session is owned by one Pi process. If Pi exits while an assignment is queued or running, replay treats the persisted non-terminal artifact as interrupted rather than claiming native process resume. The node's declared recovery policy then verifies, retries, restarts from a checkpoint, or pauses for manual action.
 
-- `subagents:rpc:v1:ready`;
-- `subagents:rpc:v1:request`;
-- `subagents:rpc:v1:reply:<requestId>`; and
-- methods `ping`, `spawn`, `status`, `interrupt`, and `stop`.
+### 8.3 Tools and writer safety
 
-The campaign plugin will use an adapter around this protocol rather than import `pi-subagents` internals. `spawn` is detached/async, which keeps the main Pi session responsive.
+Read-only assignments receive only `read`, `grep`, `find`, and `ls`. Writer assignments add `edit`, `write`, and `bash`; shell/test capabilities add `bash`. Campaign disables ancillary acceptance-report generation and uses first-class Campaign gates for validation.
 
-A spawned node receives explicit `phase`, `label`, `model`, `acceptance`, output schema/path, context mode, worktree mode, and limits. The returned `asyncId` and `asyncDir` are persisted immediately.
+The initial native kernel does not create worktrees. Parallel writers remain compile-time restricted. A campaign that explicitly requires isolated writers must obtain an auditable user approval to serialize in the active worktree, and all mutation-capable assignments take the canonical cross-process writer lock.
 
-### 8.3 Status and transcript ingestion
+### 8.4 Controls
 
-The adapter will:
-
-- use RPC for lifecycle/control actions;
-- read versioned `status.json` for structured progress;
-- tail `events.jsonl` and output/transcript artifacts with `fs.watch` plus a portable interval fallback;
-- validate `lifecycleArtifactVersion` before parsing; and
-- keep all artifact parsing behind a compatibility layer.
-
-The inspector can therefore show current tool, path, recent output, tokens, cost, model, thinking, attempts, acceptance status, and child session/transcript paths without scraping terminal rendering.
-
-### 8.4 Required RPC extension
-
-RPC v1 does **not** expose `resume`, `steer`, or `append-step`, although the `subagent` tool supports them. Full control requires one of these, in preference order:
-
-1. contribute a backwards-compatible v2/additive RPC change to `pi-subagents` for `resume`, `steer`, and `append-step`;
-2. use a public API exported by a future `pi-subagents` release; or
-3. fall back to campaign-level restart/retry semantics where a paused node is relaunched from its persisted prompt and artifacts.
-
-Do not import private executor modules as the production solution. The backend interface will isolate this gap so the rest of the product can ship against v1.
-
-### 8.5 Resolved local dependency issue
-
-The installed `pi-subagents` 0.35.1 initially failed to launch async workers because its optional peer dependency `typebox` was not resolvable from the package:
-
-```text
-Cannot find module 'typebox/compile'
-```
-
-This machine now has `typebox` 1.1.38 installed at the Pi package root, `typebox/compile` imports successfully, and a real detached `pi-subagents` child completed a smoke test. Milestone 0 must still make `/campaign-doctor` detect this condition and provide actionable remediation for clean installations.
+Campaign pause prevents new scheduling but cannot freeze an already in-flight provider request. Stop-agent calls `AgentSession.abort()` and settles the lifecycle artifact before the supervisor marks the node stopped/skipped. Retry creates a new assignment session from persisted Campaign state. The control plane must describe these semantics honestly rather than claiming process-native resume.
 
 ## 9. Automatic model and thinking routing
 
@@ -435,11 +405,11 @@ Pi model metadata provides context, output, reasoning, image, and cost informati
 
 1. **Ingest:** capture goal, cwd, session ID, available models, active tools, and relevant configuration.
 2. **Route generator:** small router chooses the campaign-generator model and thinking level.
-3. **Generate:** a read-only planner/context-builder subagent inspects the repository and returns restricted TypeScript source plus a concise phase summary.
+3. **Generate:** a bounded, read-only Campaign-native SDK assignment designs labeled hierarchical phases from the goal without inspecting or performing repository work.
 4. **Compile:** parse and compile source to IR without executing it.
 5. **Repair:** if compilation fails, return diagnostics to the generator for at most two bounded repair attempts.
 6. **Risk/size analysis:** calculate maximum fan-out, writers, gates, commands, token estimate, and required capabilities.
-7. **Launch gate:** apply configured launch policy (`always`, `smart`, or `never`). The default should be `smart`: auto-run routine bounded campaigns, show approval for unusually large/risky campaigns.
+7. **Launch gate:** apply configured launch policy (`always`, `smart`, or `never`). The default is `smart`: auto-run routine bounded campaigns and durably pause unusually large/risky campaigns for explicit inspector approval.
 8. **Execute:** persist `run.started` and enter the Campaign supervisor loop.
 
 Generated source and IR are always viewable before or during execution. A user can save a successful source program for reuse.
@@ -463,11 +433,15 @@ Project-local definitions load only for trusted projects. Personal/project namin
 ├── campaign.ir.json
 ├── state.json
 ├── events.jsonl
-├── lease.json
+├── lease.lock/owner.json
 ├── outputs/
 ├── gates/
 ├── router/
-├── subagents/
+├── assignments/
+│   ├── <node>.txt
+│   └── .runtime-<id>/
+│       ├── status.json
+│       └── session/*.jsonl
 └── logs/
 ```
 
@@ -563,7 +537,7 @@ Initial commands:
 - `/campaign-run <name> [args]` — run a saved campaign.
 - `/campaign-save <run-id> [name]` — save generated source personally or in the project.
 - `/campaign-stop <run-id>` — stop a run without opening the inspector.
-- `/campaign-doctor` — diagnose Pi, `pi-subagents`, model auth, storage, and RPC compatibility.
+- `/campaign-doctor` — diagnose Pi SDK kernel, model auth, storage, and lifecycle compatibility.
 - `/campaign-config` — configure invocation, launch approval, size, storage, and routing policy.
 
 Optional input interception recognizes `ultracode:` only for human interactive input. It must ignore extension-injected, RPC, print-mode, and queued internal messages to prevent accidental recursion. It can be disabled independently.
@@ -598,8 +572,8 @@ src/
 ├── model-router/
 ├── persistence/
 ├── adapters/
-│   ├── subagents-rpc-v1.ts
-│   ├── subagents-artifacts-v2.ts
+│   ├── pi-sdk-kernel.ts
+│   ├── kernel-artifacts.ts
 │   └── fake-kernel.ts
 ├── tui/
 │   ├── inspector.ts
@@ -615,7 +589,7 @@ test/
 └── e2e/
 ```
 
-The package manifest exposes the Pi extension and lists Pi core packages plus `typebox` as peer dependencies. Runtime libraries not supplied by Pi belong in `dependencies`. Keep `pi-subagents` behind the event-bus protocol rather than bundling a second extension instance.
+The package manifest exposes the Pi extension and lists Pi SDK/core packages plus `typebox` as peer dependencies. Runtime libraries not supplied by Pi belong in `dependencies`. Assignment sessions use the host Pi SDK directly with extension discovery disabled.
 
 ## 15. Independently shippable milestones
 
@@ -625,17 +599,17 @@ Deliver:
 
 - Pi package skeleton;
 - extension loading and `/campaign-doctor`;
-- `pi-subagents` RPC ping adapter;
+- Campaign-native Pi SDK kernel ping and model-resolution probe;
 - available-model inventory using `ctx.modelRegistry.getAvailable()`;
 - temporary run storage and cleanup probe;
 - fake backend for deterministic tests; and
-- one real async child smoke test.
+- one real asynchronous SDK assignment smoke test.
 
 Acceptance:
 
 - doctor clearly detects an absent or incompatible `typebox/compile` dependency;
-- RPC availability and version are reported without reading secrets;
-- a real child can be spawned, observed, and completed after dependency remediation;
+- native-kernel availability and authenticated-model count are reported without reading secrets;
+- a real SDK assignment can be spawned, observed, stopped, and completed;
 - package reload and session shutdown leak no watchers/timers; and
 - unit/integration test commands are established.
 
@@ -681,16 +655,16 @@ Acceptance:
 - writer locks are enforced; and
 - corrupt/truncated log behavior is tested.
 
-### Milestone 3 — Live `pi-subagents` execution
+### Milestone 3 — Campaign-native Pi SDK execution
 
 Deliver:
 
-- v1 RPC spawn/status/interrupt/stop integration;
-- status/event/artifact watcher;
-- assignment-to-kernel prompt/acceptance/model mapping;
-- concise session notifications and footer status;
+- SDK assignment spawn/status/interrupt/stop integration;
+- versioned native lifecycle artifact watcher;
+- assignment-to-session prompt/tool/model/thinking mapping;
+- silent parent-chat behavior and compact footer status;
 - `/campaign-list` and textual inspection; and
-- delegation of single-writer and worktree execution to the kernel.
+- serialized native writer execution.
 
 Acceptance:
 
@@ -698,7 +672,7 @@ Acceptance:
 - phase, prompt, tools, model, thinking, tokens, cost, result, and errors are captured;
 - stopping Pi and reopening restores run state;
 - active run cleanup is correct on session replacement/shutdown; and
-- a multi-stage real campaign completes through `pi-subagents`.
+- a multi-stage real campaign completes through Campaign-owned SDK sessions without parent-chat completion notifications.
 
 ### Milestone 4 — First-class gates and controls
 
@@ -709,7 +683,7 @@ Deliver:
 - pause, stop, retry, skip, edit-pending-prompt, and model override APIs;
 - auditable overrides;
 - recovery policies for interrupted nodes; and
-- campaign-level resume against RPC v1.
+- campaign-level resume through persisted replay and fresh assignment sessions.
 
 Acceptance:
 
@@ -789,9 +763,9 @@ Acceptance:
 
 Deliver:
 
-- additive `pi-subagents` RPC support for `steer`, `resume`, and `append-step`, or an equivalent public API;
-- mid-agent prompt steering from the inspector;
-- resumable child sessions where supported;
+- explicit inspector steering for live SDK assignment sessions where deterministic semantics permit it;
+- persisted session continuation where it can be reconciled safely;
+- stronger process-isolation options for untrusted or mutation-heavy assignments;
 - scale warnings and cost projections;
 - retention/redaction controls;
 - package documentation, migration policy, and release automation;
@@ -800,11 +774,11 @@ Deliver:
 
 Acceptance:
 
-- a running child acknowledges inspector steering;
-- paused child sessions resume without losing available context;
+- a running assignment acknowledges inspector steering;
+- persisted assignment sessions continue without losing available context where reconciliation is safe;
 - 100+ bounded read-only tasks remain inspectable without UI degradation;
 - leaked secrets are absent from persisted fixtures/logs;
-- compatibility tests cover supported Pi and `pi-subagents` versions; and
+- compatibility tests cover supported Pi SDK versions; and
 - installation through `pi install` works from a clean environment.
 
 ## 16. Test strategy
@@ -831,9 +805,9 @@ Acceptance:
 
 ### Integration
 
-- fake event-bus RPC server;
-- real `pi-subagents` v1 smoke runs;
-- `status.json`/`events.jsonl` compatibility fixtures;
+- fake kernel and native lifecycle-artifact fixtures;
+- real Pi SDK assignment completion and cancellation smoke runs;
+- `status.json`/`events.jsonl` recovery fixtures;
 - restart with an in-flight read task and writer task;
 - worktree writer isolation and serialized merge;
 - unavailable/rate-limited model escalation; and
@@ -873,8 +847,8 @@ Hard caps live in trusted user/project configuration and cannot be raised by gen
 | Risk | Mitigation |
 |---|---|
 | Generated TypeScript executes arbitrary code | Parse restricted AST into IR; never import/eval default campaign source. |
-| `pi-subagents` RPC lacks full controls | Adapter boundary; ship campaign-level retry/resume first; add public RPC methods upstream. |
-| Current `typebox/compile` resolution failure | Milestone 0 doctor and mandatory real-child smoke test. |
+| In-process SDK assignment dies with Pi | Durable lifecycle artifact, interruption reconciliation, and declared node recovery policy. |
+| Native kernel lacks worktrees | Reject unsafe parallel writers; require explicit serialized downgrade and canonical writer lock. |
 | “Best model” is not derivable from Pi metadata alone | Capability profiles, small routing model, deterministic validation, local outcome telemetry, bounded escalation. |
 | Duplicate edits after crash | Persist-before-side-effect events, writer recovery policies, verify-before-retry default. |
 | Parallel writers conflict | Compiler/supervisor writer rules; kernel worktree isolation and serialized merge gates. |
@@ -883,10 +857,10 @@ Hard caps live in trusted user/project configuration and cannot be raised by gen
 | State diverges after source edit | Content hashes, immutable run source/IR snapshots, explicit new revision on edit. |
 | Gate judge is nondeterministic | Structured verdicts, evidence capture, input-hash caching, independent review where warranted. |
 | User overrides a safety gate accidentally | Deliberate confirmation, evidence display, audit log; still overridable as requested. |
-| Private API drift | Use stable RPC and versioned artifacts through compatibility adapters; CI matrix. |
+| Pi SDK drift | Use only public SDK contracts, version native artifacts, and test supported Pi versions in CI. |
 
 ## 19. Definition of the first production-quality release
 
 The project is production-ready when a user can submit a substantive goal, leave model selection entirely on automatic, inspect the generated TypeScript and compiled phases, let the run continue in the background, reopen Pi after a restart, inspect or prompt the campaign from `/campaign-inspect`, override any gate, and receive a final evidence-backed result—without the master conversation holding or manually advancing every intermediate step.
 
-The recommended implementation order is Milestones 0 through 7. Milestone 8 should proceed in parallel as an upstream `pi-subagents` compatibility effort once the v1-backed Campaign supervisor is stable.
+The recommended implementation order is Milestones 0 through 7. Milestone 8 hardens the Campaign-native SDK runtime after the core supervisor is stable.

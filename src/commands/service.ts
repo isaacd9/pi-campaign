@@ -13,7 +13,7 @@ import { loadSavedCampaign, runDir, runRoot, saveCampaign } from "../persistence
 import type { CampaignState } from "../persistence/types.ts";
 import { createId, safeName } from "../shared/ids.ts";
 import type { CampaignKernel, KernelRun, KernelStatus } from "../adapters/kernel.ts";
-import { SubagentsRpcV1Kernel } from "../adapters/subagents-rpc-v1.ts";
+import { PiSdkKernel } from "../adapters/pi-sdk-kernel.ts";
 import { CampaignSupervisor } from "../supervisor/supervisor.ts";
 import { withCwdWriterLock } from "../supervisor/writer-lock.ts";
 import { CampaignOrchestratorSession } from "../orchestrator/session.ts";
@@ -34,7 +34,7 @@ export class CampaignService {
   }
   async runSource(source: string, goal: string, ctx: ExtensionContext, existing?: EventStore, input?: unknown): Promise<string> {
     const authenticatedModels = await this.availableModels(ctx);
-    const compiled = compileCampaign(source, { hardCaps: this.config.hardCaps, availableModels: authenticatedModels.map((model) => `${model.provider}/${model.id}`) }); const sessionId = ctx.sessionManager.getSessionId() ?? "ephemeral"; const runId = existing?.state.runId ?? createId("campaign"); const dir = existing?.runDir ?? runDir(sessionId, runId); await mkdir(join(dir, "subagents"), { recursive: true, mode: 0o700 }); await writeFile(join(dir, "source.campaign.ts"), source, { mode: 0o600 }); await writeFile(join(dir, "campaign.ir.json"), `${JSON.stringify(compiled.ir, null, 2)}\n`, { mode: 0o600 }); if (compiled.ir.inputSchema) { const validate = new Ajv({ allErrors: true, strict: false }).compile(compiled.ir.inputSchema); if (!validate(input)) throw new Error(`Campaign input failed schema: ${new Ajv().errorsText(validate.errors)}`); } const store = existing ?? await EventStore.create(dir, runId, goal, ctx.cwd); this.watchStore(store, ctx); await store.append("run.created", { ir: compiled.ir, summary: compiled.summary, irHash: compiled.irHash, ...(input !== undefined ? { input } : {}) }); this.pi.appendEntry("campaign-run", { runId, status: "compiled", sourceHash: compiled.ir.sourceHash, irHash: compiled.irHash });
+    const compiled = compileCampaign(source, { hardCaps: this.config.hardCaps, availableModels: authenticatedModels.map((model) => `${model.provider}/${model.id}`) }); const sessionId = ctx.sessionManager.getSessionId() ?? "ephemeral"; const runId = existing?.state.runId ?? createId("campaign"); const dir = existing?.runDir ?? runDir(sessionId, runId); await mkdir(join(dir, "assignments"), { recursive: true, mode: 0o700 }); await writeFile(join(dir, "source.campaign.ts"), source, { mode: 0o600 }); await writeFile(join(dir, "campaign.ir.json"), `${JSON.stringify(compiled.ir, null, 2)}\n`, { mode: 0o600 }); if (compiled.ir.inputSchema) { const validate = new Ajv({ allErrors: true, strict: false }).compile(compiled.ir.inputSchema); if (!validate(input)) throw new Error(`Campaign input failed schema: ${new Ajv().errorsText(validate.errors)}`); } const store = existing ?? await EventStore.create(dir, runId, goal, ctx.cwd); this.watchStore(store, ctx); await store.append("run.created", { ir: compiled.ir, summary: compiled.summary, irHash: compiled.irHash, ...(input !== undefined ? { input } : {}) }); this.pi.appendEntry("campaign-run", { runId, status: "compiled", sourceHash: compiled.ir.sourceHash, irHash: compiled.irHash });
     const approval = this.config.launchPolicy === "always" || (this.config.launchPolicy === "smart" && requiresLaunchApproval(compiled.ir));
     if (approval) {
       // Background generation must never interrupt the parent editor with a
@@ -112,7 +112,7 @@ export class CampaignService {
           void this.generateAndLaunch(state.goal, ctx, store).catch(async (error) => { if (!this.disposed) await store.append("run.failed", { error: error instanceof Error ? error.message : String(error) }); });
           continue;
         }
-        const kernel = new SubagentsRpcV1Kernel(this.pi.events);
+        const kernel = new PiSdkKernel(activeModelKey(ctx));
         const lease = await RunLease.acquire(store.runDir, createId("restore"));
         const supervisor = this.makeSupervisor(state.ir, store, kernel, ctx, state.input);
         await supervisor.recoverInterrupted();
@@ -123,7 +123,7 @@ export class CampaignService {
     }
     this.updateStatus(ctx);
   }
-  async doctor(ctx: ExtensionContext): Promise<string> { const lines = ["Campaign doctor", `storage: ${runRoot(ctx.sessionManager.getSessionId() ?? "ephemeral")}`]; try { await import("typebox/compile"); lines.push("typebox/compile: ok"); } catch (error) { lines.push(`typebox/compile: MISSING (${error instanceof Error ? error.message : String(error)})`, "remediation: install typebox at the Pi package root, then /reload"); } try { const adapter = new SubagentsRpcV1Kernel(this.pi.events, 1500); const ping = await adapter.ping(); adapter.dispose(); lines.push(`pi-subagents RPC: v${ping.version} (${ping.methods.join(", ")})`); } catch (error) { lines.push(`pi-subagents RPC: unavailable (${error instanceof Error ? error.message : String(error)})`); } try { const models = await ctx.modelRegistry.getAvailable(); lines.push(`authenticated models: ${models.length}`); } catch (error) { lines.push(`authenticated models: error (${String(error)})`); } try { const probe = join(runRoot(ctx.sessionManager.getSessionId() ?? "ephemeral"), `.doctor-${process.pid}`); await mkdir(probe, { recursive: true }); await writeFile(join(probe, "probe"), "ok"); await import("node:fs/promises").then(({ rm }) => rm(probe, { recursive: true, force: true })); lines.push("storage probe: ok"); } catch (error) { lines.push(`storage probe: failed (${String(error)})`); } lines.push("RPC v1 limitation: native child resume, steer, and append-step are unavailable; Campaign uses persisted restart/retry semantics."); return lines.join("\n"); }
+  async doctor(ctx: ExtensionContext): Promise<string> { const lines = ["Campaign doctor", `storage: ${runRoot(ctx.sessionManager.getSessionId() ?? "ephemeral")}`]; try { await import("typebox/compile"); lines.push("typebox/compile: ok"); } catch (error) { lines.push(`typebox/compile: MISSING (${error instanceof Error ? error.message : String(error)})`, "remediation: install typebox at the Pi package root, then /reload"); } try { const kernel = new PiSdkKernel(); const ping = await kernel.ping(); kernel.dispose(); lines.push(`Campaign Pi SDK kernel: v${ping.version} (${ping.methods.join(", ")})`); } catch (error) { lines.push(`Campaign Pi SDK kernel: unavailable (${error instanceof Error ? error.message : String(error)})`); } try { const models = await ctx.modelRegistry.getAvailable(); lines.push(`authenticated models: ${models.length}`); } catch (error) { lines.push(`authenticated models: error (${String(error)})`); } try { const probe = join(runRoot(ctx.sessionManager.getSessionId() ?? "ephemeral"), `.doctor-${process.pid}`); await mkdir(probe, { recursive: true }); await writeFile(join(probe, "probe"), "ok"); await import("node:fs/promises").then(({ rm }) => rm(probe, { recursive: true, force: true })); lines.push("storage probe: ok"); } catch (error) { lines.push(`storage probe: failed (${String(error)})`); } lines.push("Campaign owns assignment sessions directly through Pi's public SDK; interrupted sessions use persisted campaign-level recovery."); return lines.join("\n"); }
   async dispose(): Promise<void> {
     this.disposed = true;
     for (const orchestrator of this.orchestrators.values()) { if (orchestrator.isStreaming) await orchestrator.abort().catch(() => undefined); orchestrator.dispose(); }
@@ -155,12 +155,12 @@ export class CampaignService {
     if (this.context) this.context.ui.setStatus("campaign", undefined);
   }
   private async generateAndLaunch(goal: string, ctx: ExtensionContext, store: EventStore): Promise<void> {
-    const models = await this.availableModels(ctx); const decision = new ModelRouter(models).routeSync({ taskClass: "generation", prompt: goal, risk: "medium" }); await mkdir(join(store.runDir, "router"), { recursive: true }); await mkdir(join(store.runDir, "subagents"), { recursive: true, mode: 0o700 }); await writeFile(join(store.runDir, "router", "generation.json"), `${JSON.stringify(decision, null, 2)}\n`, { mode: 0o600 }); const bootstrapLease = await RunLease.acquire(store.runDir, createId("generator")); this.bootstrapLeases.add(bootstrapLease); const kernel = new SubagentsRpcV1Kernel(this.pi.events); this.bootstrapKernels.add(kernel); const bootstrap: BootstrapRun = { kernel, store }; this.bootstrapRuns.set(store.state.runId, bootstrap); this.updateStatus(ctx); let prompt = generatorPrompt(goal, this.config.hardCaps); let source = "";
+    const models = await this.availableModels(ctx); const decision = new ModelRouter(models).routeSync({ taskClass: "generation", prompt: goal, risk: "medium" }); await mkdir(join(store.runDir, "router"), { recursive: true }); await mkdir(join(store.runDir, "assignments"), { recursive: true, mode: 0o700 }); await writeFile(join(store.runDir, "router", "generation.json"), `${JSON.stringify(decision, null, 2)}\n`, { mode: 0o600 }); const bootstrapLease = await RunLease.acquire(store.runDir, createId("generator")); this.bootstrapLeases.add(bootstrapLease); const kernel = new PiSdkKernel(activeModelKey(ctx)); this.bootstrapKernels.add(kernel); const bootstrap: BootstrapRun = { kernel, store }; this.bootstrapRuns.set(store.state.runId, bootstrap); this.updateStatus(ctx); let prompt = generatorPrompt(goal, this.config.hardCaps); let source = "";
     try {
       for (let attempt = 0; attempt < 3; attempt++) {
         const nodeId = attempt === 0 ? "campaign-generator" : `campaign-generator-repair-${attempt}`;
         await store.append("node.scheduled", { nodeId, attempt: attempt + 1 });
-        const run = await kernel.spawn({ agent: "scout", task: prompt, cwd: ctx.cwd, model: decision.model, phase: "Generate", label: `generator-${attempt + 1}`, outputPath: join(store.runDir, "subagents", `${nodeId}.txt`), acceptance: { level: "none", reason: "Generator output is validated by the restricted Campaign compiler." }, turnBudget: { maxTurns: 2, graceTurns: 1 }, toolBudget: { hard: 1, block: "*" } });
+        const run = await kernel.spawn({ agent: "scout", task: prompt, cwd: ctx.cwd, model: decision.model, phase: "Generate", label: `generator-${attempt + 1}`, outputPath: join(store.runDir, "assignments", `${nodeId}.txt`), acceptance: { level: "none", reason: "Generator output is validated by the restricted Campaign compiler." }, turnBudget: { maxTurns: 2, graceTurns: 1 }, toolBudget: { hard: 1, block: "*" } });
         bootstrap.currentRun = run; bootstrap.currentNodeId = nodeId;
         await store.append("node.started", { nodeId, kernelRunId: run.id, asyncDir: run.asyncDir, countAgent: false });
         const status = await this.wait(run, kernel);
@@ -175,7 +175,7 @@ export class CampaignService {
     } finally { this.bootstrapRuns.delete(store.state.runId); this.bootstrapKernels.delete(kernel); kernel.dispose(); this.bootstrapLeases.delete(bootstrapLease); await bootstrapLease.release(); this.updateStatus(ctx); }
     if (this.disposed) return; await this.runSource(source, goal, ctx, store);
   }
-  private async launch(ir: CampaignIR, store: EventStore, ctx: ExtensionContext, input?: unknown): Promise<void> { if (this.disposed) throw new Error("Campaign service disposed"); const kernel = new SubagentsRpcV1Kernel(this.pi.events); await kernel.ping(); const lease = await RunLease.acquire(store.runDir, createId("owner")); const supervisor = this.makeSupervisor(ir, store, kernel, ctx, input); const promise = supervisor.run().then((state) => { if (!this.disposed) this.pi.appendEntry("campaign-run", { runId: state.runId, status: state.status, updatedAt: state.updatedAt }); return state; }).finally(() => this.cleanup(store.state.runId)); this.active.set(store.state.runId, { supervisor, kernel, lease, promise, dormant: false }); this.updateStatus(ctx); }
+  private async launch(ir: CampaignIR, store: EventStore, ctx: ExtensionContext, input?: unknown): Promise<void> { if (this.disposed) throw new Error("Campaign service disposed"); const kernel = new PiSdkKernel(activeModelKey(ctx)); await kernel.ping(); const lease = await RunLease.acquire(store.runDir, createId("owner")); const supervisor = this.makeSupervisor(ir, store, kernel, ctx, input); const promise = supervisor.run().then((state) => { if (!this.disposed) this.pi.appendEntry("campaign-run", { runId: state.runId, status: state.status, updatedAt: state.updatedAt }); return state; }).finally(() => this.cleanup(store.state.runId)); this.active.set(store.state.runId, { supervisor, kernel, lease, promise, dormant: false }); this.updateStatus(ctx); }
   private makeSupervisor(ir: CampaignIR, store: EventStore, kernel: CampaignKernel, ctx: ExtensionContext, input?: unknown): CampaignSupervisor {
     const routerPromise = this.availableModels(ctx).then((models) => new ModelRouter(models));
     const gates = new GateExecutor(ctx.cwd, {
@@ -184,8 +184,11 @@ export class CampaignService {
       review: async (focus, agent = "reviewer") => {
         if (store.state.agentsStarted >= ir.limits.maxAgents) throw new Error(`Runtime maxAgents ${ir.limits.maxAgents} reached before review gate.`);
         const reviewId = `review-gate-${store.state.gates.length + 1}`;
+        const task = `Independently review the campaign work. Focus: ${focus}. Return JSON only: {\"verdict\": \"pass\" | \"fail\", \"evidence\": string, \"findings\": string[]}.`;
         await store.append("node.scheduled", { nodeId: reviewId, attempt: 1 });
-        const run = await kernel.spawn({ agent, task: `Independently review the campaign work. Focus: ${focus}. Return JSON only: {\"verdict\": \"pass\" | \"fail\", \"evidence\": string, \"findings\": string[]}.`, cwd: ctx.cwd, phase: "Review", label: "review-gate", outputPath: join(store.runDir, "subagents", `${reviewId}.txt`) });
+        const decision = await (await routerPromise).route({ taskClass: "review", prompt: task, risk: "medium" });
+        await store.append("model.routed", { nodeId: reviewId, decision });
+        const run = await kernel.spawn({ agent, task, cwd: ctx.cwd, phase: "Review", label: "review-gate", model: decision.model, thinking: decision.thinking, outputSchema: { type: "object", required: ["verdict", "evidence", "findings"] }, outputPath: join(store.runDir, "assignments", `${reviewId}.txt`) });
         await store.append("node.started", { nodeId: reviewId, kernelRunId: run.id, asyncDir: run.asyncDir });
         const status = await this.wait(run, kernel);
         await this.recordUsage(store, run.id, status);
@@ -202,11 +205,11 @@ export class CampaignService {
     return new CampaignSupervisor(ir, store, kernel, gates, {
       pollMs: this.config.pollMs,
       ...(input !== undefined ? { input } : {}),
-      approveIsolationDowngrade: async (nodeId) => ctx.hasUI && ctx.ui.confirm("Worktree isolation unavailable", `Campaign node '${nodeId}' requires concurrent isolated writers, but pi-subagents RPC v1 cannot provide worktrees for these launches. Serialize the writers in the active worktree instead?`),
+      approveIsolationDowngrade: async (nodeId) => ctx.hasUI && ctx.ui.confirm("Worktree isolation unavailable", `Campaign node '${nodeId}' requires concurrent isolated writers, but the Campaign Pi SDK kernel does not yet provide worktrees for these launches. Serialize the writers in the active worktree instead?`),
       withWriterLock: (work) => withCwdWriterLock(ctx.cwd, work),
       route: async (node, instanceId) => {
         const writer = node.capabilities.includes("code-write") || ["worker", "implementer"].includes(node.agent);
-        const decision = await (await routerPromise).route({ taskClass: writer ? "implementation" : "scout", prompt: String(node.prompt), writer, risk: writer ? "medium" : "low" });
+        const decision = await (await routerPromise).route({ taskClass: writer ? "implementation" : node.agent === "reviewer" ? "review" : node.agent === "architect" ? "synthesis" : "scout", prompt: typeof node.prompt === "string" ? node.prompt : JSON.stringify(node.prompt), writer, risk: writer ? "medium" : "low" });
         await mkdir(join(store.runDir, "router"), { recursive: true, mode: 0o700 });
         await writeFile(join(store.runDir, "router", `${instanceId.replace(/[^A-Za-z0-9._-]/g, "_")}.json`), `${JSON.stringify(decision, null, 2)}\n`, { mode: 0o600 });
         await store.append("model.routed", { nodeId: instanceId, decision });
@@ -230,7 +233,7 @@ export class CampaignService {
     await store.append("usage.recorded", { kernelRunId, tokens: status.tokens ?? 0, cost: status.cost ?? 0, state: status.state });
   }
   private async availableModels(ctx: ExtensionContext): Promise<AvailableModel[]> { const models = await ctx.modelRegistry.getAvailable(); return models.map((model) => ({ provider: model.provider, id: model.id, name: model.name, reasoning: model.reasoning, ...(model.thinkingLevelMap ? { thinkingLevelMap: model.thinkingLevelMap as NonNullable<AvailableModel["thinkingLevelMap"]> } : {}), input: [...model.input], contextWindow: model.contextWindow, maxTokens: model.maxTokens, cost: model.cost })); }
-  private async activatePersisted(id: string): Promise<ActiveRun> { const ctx = this.context; if (!ctx) throw new Error("No active Campaign context."); const { store } = await EventStore.open(runDir(ctx.sessionManager.getSessionId() ?? "ephemeral", id)); this.watchStore(store, ctx); if (!store.state.ir) throw new Error(`Campaign '${id}' has no compiled IR.`); const kernel = new SubagentsRpcV1Kernel(this.pi.events); await kernel.ping(); const lease = await RunLease.acquire(store.runDir, createId("retry")); const supervisor = this.makeSupervisor(store.state.ir, store, kernel, ctx, store.state.input); const run: ActiveRun = { supervisor, kernel, lease, dormant: true }; this.active.set(id, run); this.updateStatus(ctx); return run; }
+  private async activatePersisted(id: string): Promise<ActiveRun> { const ctx = this.context; if (!ctx) throw new Error("No active Campaign context."); const { store } = await EventStore.open(runDir(ctx.sessionManager.getSessionId() ?? "ephemeral", id)); this.watchStore(store, ctx); if (!store.state.ir) throw new Error(`Campaign '${id}' has no compiled IR.`); const kernel = new PiSdkKernel(activeModelKey(ctx)); await kernel.ping(); const lease = await RunLease.acquire(store.runDir, createId("retry")); const supervisor = this.makeSupervisor(store.state.ir, store, kernel, ctx, store.state.input); const run: ActiveRun = { supervisor, kernel, lease, dormant: true }; this.active.set(id, run); this.updateStatus(ctx); return run; }
   private requireActive(id: string): ActiveRun { const run = this.active.get(id); if (!run) throw new Error(`Campaign '${id}' is not active.`); return run; }
   private cleanup(id: string): void { const run = this.active.get(id); if (!run) return; run.kernel.dispose(); void run.lease.release(); this.active.delete(id); if (this.context) this.updateStatus(this.context); }
   private watchStore(store: EventStore, ctx: ExtensionContext): void {
@@ -264,4 +267,5 @@ export function shouldRestoreState(state: CampaignState): boolean {
   if (!state.ir && state.status === "failed") return false;
   return ["running", "paused"].includes(state.status) || (state.status === "failed" && hasInterruptedWork);
 }
+function activeModelKey(ctx: ExtensionContext): string | undefined { return ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined; }
 function requiresLaunchApproval(ir: CampaignIR): boolean { const agentTasks = ir.nodes.filter((node) => node.kind === "agent-task"); const writers = agentTasks.filter((node) => node.capabilities.includes("code-write") || ["worker", "implementer"].includes(node.agent)); const riskyGate = ir.nodes.some((node) => node.kind === "gate" && ["command", "safety"].includes(node.check.type)); return ir.limits.maxAgents > 25 || ir.limits.maxTokens > 1_500_000 || writers.length > 1 || riskyGate; }

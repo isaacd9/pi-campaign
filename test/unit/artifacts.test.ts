@@ -3,26 +3,24 @@ import test from "node:test";
 import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { readSubagentStatus } from "../../src/adapters/subagents-artifacts-v2.ts";
+import { readKernelStatus } from "../../src/adapters/kernel-artifacts.ts";
 import { GateExecutor } from "../../src/gates/index.ts";
 import { initialState } from "../../src/supervisor/reducer.ts";
 
-test("artifact adapter requires v2, reads costUsd, and contains outputFile", async () => {
+test("native kernel artifact requires v1 and preserves trusted final output and usage", async () => {
   const root = await mkdtemp(join(tmpdir(), "campaign-artifact-"));
   try {
-    await writeFile(join(root, "out.txt"), "full transcript with prompt examples");
     const finalPath = join(root, "final.txt");
-    await writeFile(finalPath, "final child result");
-    await writeFile(join(root, "status.json"), JSON.stringify({ lifecycleArtifactVersion: 2, state: "complete", outputFile: "out.txt", totalTokens: { total: 12 }, totalCost: { costUsd: 0.25 } }));
-    const status = await readSubagentStatus(root, finalPath);
-    assert.equal(status.output, "final child result");
+    await writeFile(finalPath, "final assignment result");
+    await writeFile(join(root, "status.json"), JSON.stringify({ campaignLifecycleArtifactVersion: 1, state: "complete", tokens: 12, cost: 0.25, recentOutput: ["working"] }));
+    const status = await readKernelStatus(root, finalPath);
+    assert.equal(status.output, "final assignment result");
+    assert.equal(status.tokens, 12);
     assert.equal(status.cost, 0.25);
-    await writeFile(join(root, "status.json"), JSON.stringify({ lifecycleArtifactVersion: 2, state: "complete", outputFile: join(root, "out.txt") }));
-    assert.equal((await readSubagentStatus(root)).output, "full transcript with prompt examples", "absolute output path must survive /var to /private/var canonicalization");
+    await writeFile(join(root, "status.json"), JSON.stringify({ campaignLifecycleArtifactVersion: 1, state: "complete", output: { ok: true } }));
+    assert.deepEqual((await readKernelStatus(root)).output, { ok: true });
     await writeFile(join(root, "status.json"), JSON.stringify({ state: "complete" }));
-    await assert.rejects(readSubagentStatus(root), /expected 2/);
-    await writeFile(join(root, "status.json"), JSON.stringify({ lifecycleArtifactVersion: 2, state: "complete", outputFile: "../outside.txt" }));
-    await assert.rejects(readSubagentStatus(root), /escapes async artifact directory/);
+    await assert.rejects(readKernelStatus(root), /expected 1/);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

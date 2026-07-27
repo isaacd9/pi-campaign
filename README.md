@@ -1,8 +1,8 @@
 # pi-campaign
 
-Campaign is a Pi package for compiling restricted TypeScript workflow programs into a versioned IR and running them as durable, deterministic stages through `pi-subagents`.
+Campaign is a Pi package for compiling restricted TypeScript workflow programs into a versioned IR and running them as durable, deterministic stages through Campaign-owned Pi SDK sessions.
 
-> **Release status:** 0.1 is a usable v1-RPC release. It implements the safe compiler, persistence/replay, gates, automatic routing, generation pipeline, saved programs, controls, and inspector. Native child `resume`, `steer`, and `append-step` remain unavailable in `pi-subagents` RPC v1; Campaign deliberately uses campaign-level restart/retry and does not import private executor modules.
+> **Release status:** 0.1 implements the safe compiler, native assignment runtime, persistence/replay, gates, automatic routing, generation pipeline, saved programs, controls, and inspector. Campaign owns scheduling and isolated agent sessions directly; it does not require `pi-subagents`.
 
 ## Install
 
@@ -12,15 +12,14 @@ pi install npm:pi-campaign
 pi -e ./extensions/campaign/index.ts
 ```
 
-Campaign expects `pi-subagents` to be loaded separately. Pi supplies the core peer packages and `typebox`; runtime-only libraries (`typescript` for AST parsing and `ajv` for schemas) are normal dependencies.
+Pi supplies the SDK/model/tool peer packages and `typebox`; runtime-only libraries (`typescript` for AST parsing and `ajv` for schemas) are normal dependencies.
 
 Run `/campaign-doctor` after installation. It checks:
 
 - `typebox/compile` resolution with remediation;
-- `pi-subagents` RPC v1 availability and methods;
-- authenticated model count;
+- the Campaign Pi SDK kernel and authenticated models;
 - private run-storage creation and cleanup; and
-- the v1 control limitation.
+- persisted interruption/recovery behavior.
 
 ## Commands
 
@@ -30,7 +29,7 @@ Run `/campaign-doctor` after installation. It checks:
 - `/campaign-run <name> [json-input]` — validate typed JSON input and run a saved campaign (project definition overrides personal).
 - `/campaign-save <run-id> [name] [--project]` — save immutable run source.
 - `/campaign-stop <run-id>` — stop an active run.
-- `/campaign-doctor` — dependency/RPC/storage/model diagnosis.
+- `/campaign-doctor` — dependency/native-kernel/storage/model diagnosis.
 - `/campaign-config [json]` — show (loads JSON into the editor in TUI) or merge configuration.
 
 When enabled (default), human interactive input beginning with `ultracode:` is equivalent to `/campaign`. RPC, extension-injected, queued, and streaming input is ignored to prevent recursion.
@@ -103,6 +102,10 @@ Run data is private local state:
   events.jsonl
   lease.lock/owner.json      # atomic lease directory, only while owned
   router/generation.json
+  assignments/<node>.txt
+  assignments/.runtime-<id>/
+    status.json
+    session/*.jsonl
 ```
 
 `run.json` stores immutable run identity, `events.jsonl` is authoritative and append-only, and `state.json` is only an atomic materialized cache. Replay uses a pure reducer. A corrupt final partial JSONL line is diagnosed and truncated; middle corruption stops recovery. Side effects are preceded by `node.scheduled`; in-flight nodes become `interrupted` after restart and follow their declared recovery policy. Completed task instances and fan-out items remain cached.
@@ -111,7 +114,7 @@ Saved definitions live in `~/.pi/agent/campaigns/*.campaign.ts` and trusted-proj
 
 ## Inspector
 
-Launching a campaign leaves the parent editor undisturbed and reports compact progress only in Pi's footer status line. If the configured launch policy requires approval, the compiled campaign pauses durably instead of opening a late modal; open `/campaign-inspect` and press `p` to approve and launch it. `/campaign-inspect` explicitly opens the dedicated Campaign workspace built from the proven `pi-subagents` fleet layout and overlay-compositor patterns. Closing it never stops the background supervisor. Campaign milestones remain in durable campaign state instead of being injected into parent-chat context. The campaign—not the parent Pi chat—is the first-class object:
+Launching a campaign leaves the parent editor undisturbed and reports compact progress only in Pi's footer status line. If the configured launch policy requires approval, the compiled campaign pauses durably instead of opening a late modal; open `/campaign-inspect` and press `p` to approve and launch it. `/campaign-inspect` explicitly opens the dedicated Campaign workspace using a fleet-inspired phase tree and Pi's overlay compositor. Closing it never stops the background supervisor. Campaign milestones remain in durable campaign state instead of being injected into parent-chat context. The campaign—not the parent Pi chat—is the first-class object:
 
 - an explicit campaign status, deterministic English progress summary, and started/updated timestamps;
 - a phase-labeled execution tree derived from persisted IR edges, with structural nodes, parallel branches, and dynamic instances;
@@ -138,11 +141,11 @@ Only `ctx.modelRegistry.getAvailable()` models (authenticated models) enter the 
 
 ## Known v1 limitations
 
-- RPC v1 solo spawn does not carry native phase/label/thinking/output-schema fields. Campaign preserves these in its own IR/event state, passes supported model/acceptance fields, and validates outputs itself.
-- RPC v1 in `pi-subagents` 0.35.1 has no native child resume, steer, append-step, or per-spawn completion-notification suppression. Campaign never injects its own milestones or lifecycle messages into parent chat, but this dependency may still independently emit `Background task completed/failed` messages for Campaign-owned children until its public RPC adds a silent-spawn option. The inspector exposes campaign-level pause/retry/relaunch controls and deterministic local control commands.
-- Worktree creation is delegated to `pi-subagents`; v1 solo spawn cannot request its private single-run worktree controls. The compiler rejects unsafe parallel writers. At runtime, a declared isolated writer fan-out fails unless the user explicitly approves a serialized active-worktree downgrade. Mutation-capable assignments and repair agents also take a cross-process canonical-cwd writer lock. Kernel-native grouped isolation remains reserved for a future public adapter.
-- Orchestrator chat is a dedicated Pi SDK session with campaign status/control tools. It can reason about and control campaign-level state, but RPC v1 still cannot steer a running child turn or append native executor steps.
-- The `smart` launch policy confirms campaigns with command/safety gates, multiple writers, more than 25 declared agents, or more than 1.5M declared tokens. It is a compact confirmation rather than a dedicated graph preview; source and IR paths are shown for inspection.
+- Assignment sessions run inside the owning Pi process. Pi shutdown aborts them; authoritative campaign replay marks uncertain work interrupted and applies the node's recovery policy after restart.
+- The native kernel does not yet create git worktrees. The compiler rejects unsafe parallel writers, and declared isolated writer fan-out requires explicit approval to serialize in the active worktree. Mutation-capable assignments and repair agents also take a cross-process canonical-cwd writer lock.
+- Campaign pause stops scheduling new nodes but cannot freeze a provider request already in flight. Stop-agent aborts the selected SDK session; retry starts a new persisted assignment session.
+- Orchestrator chat is a separate restricted Pi SDK session with campaign status/control tools. It cannot edit repository files or run shell commands.
+- The `smart` launch policy durably pauses risky or unusually large compiled campaigns. Open the inspector to review the phase tree and press `p` to approve execution.
 
 ## Development
 
@@ -152,4 +155,4 @@ npm run typecheck
 npm test
 ```
 
-Tests cover malicious compiler inputs, deterministic IR/hash, bounds and writer policy, reducer replay, tail/middle corruption, gates and override audit, model routing fallback/clamping, width invariants, public RPC envelopes, fake-kernel fan-out, and completed-node resume caching.
+Tests cover malicious compiler inputs, deterministic IR/hash, bounds and writer policy, reducer replay, tail/middle corruption, gates and override audit, model routing fallback/clamping, native lifecycle artifacts, width invariants, fake-kernel fan-out, and completed-node resume caching.

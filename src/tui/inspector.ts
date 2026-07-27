@@ -4,7 +4,7 @@ import type { CampaignState, NodeState, NodeStatus } from "../persistence/types.
 import type { CampaignNode } from "../dsl/types.ts";
 import type { CampaignService } from "../commands/service.ts";
 import type { CampaignOrchestratorSession, OrchestratorLine } from "../orchestrator/session.ts";
-import { readSubagentStatus } from "../adapters/subagents-artifacts-v2.ts";
+import { readKernelStatus } from "../adapters/kernel-artifacts.ts";
 import { ControlInput } from "./input.ts";
 
 const REFRESH_MS = 1_000;
@@ -38,6 +38,7 @@ export class CampaignInspector implements Component, Focusable {
   private selected = 0;
   private selectedKey: string | undefined;
   private detailLines: string[] = [];
+  private detailStatus: Awaited<ReturnType<typeof readKernelStatus>> | undefined;
   private detailScroll = 0;
   private detailAutoFollow = false;
   private chatScroll = 0;
@@ -205,6 +206,7 @@ export class CampaignInspector implements Component, Focusable {
   private wrappedDetail(row: TreeRow | undefined, width: number): string[] {
     if (!row) return [this.options.theme.fg("dim", "Waiting for the generator to publish its first campaign node…")];
     const { node, irNode } = row;
+    const artifact = this.detailStatus?.raw as { sessionFile?: string; turns?: number; toolCalls?: number } | undefined;
     const prompt = node.promptOverride ?? (irNode?.kind === "agent-task" ? printable(irNode.prompt) : undefined);
     const raw = [
       `Node: ${node.id}`,
@@ -227,7 +229,10 @@ export class CampaignInspector implements Component, Focusable {
       ...(node.kernel?.currentPath ? [`Current path: ${node.kernel.currentPath}`] : []),
       ...(node.kernel?.tokens !== undefined ? [`Tokens: ${node.kernel.tokens}`] : []),
       ...(node.kernel?.cost !== undefined ? [`Cost: $${node.kernel.cost.toFixed(4)}`] : []),
-      ...(node.kernelRunId ? [`Async run: ${node.kernelRunId}`] : []),
+      ...(node.kernelRunId ? [`Runtime run: ${node.kernelRunId}`] : []),
+      ...(artifact?.sessionFile ? [`Session file: ${artifact.sessionFile}`] : []),
+      ...(artifact?.turns !== undefined ? [`Turns: ${artifact.turns}`] : []),
+      ...(artifact?.toolCalls !== undefined ? [`Tool calls: ${artifact.toolCalls}`] : []),
       ...(node.error ? [`Error: ${node.error}`] : []),
       "",
       this.options.theme.fg("accent", "Transcript / output"),
@@ -268,13 +273,15 @@ export class CampaignInspector implements Component, Focusable {
   private async refreshDetail(): Promise<boolean> {
     const previous = this.detailLines.join("\n");
     const node = this.treeRows()[this.selected]?.node;
-    if (!node?.asyncDir) { this.detailLines = []; return previous !== ""; }
+    if (!node?.asyncDir) { this.detailLines = []; this.detailStatus = undefined; return previous !== ""; }
     try {
-      const status = await readSubagentStatus(node.asyncDir);
-      const text = typeof status.output === "string" ? status.output : status.output === undefined ? "" : JSON.stringify(status.output, null, 2);
+      const status = await readKernelStatus(node.asyncDir);
+      this.detailStatus = status;
+      const artifact = status.raw as { recentOutput?: string[] } | undefined;
+      const text = typeof status.output === "string" ? status.output : status.output === undefined ? artifact?.recentOutput?.join("\n") ?? "" : JSON.stringify(status.output, null, 2);
       this.detailLines = text.split(/\r?\n/).slice(-TRANSCRIPT_LINES);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") this.detailLines = [`status unavailable: ${error instanceof Error ? error.message : String(error)}`];
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") { this.detailStatus = undefined; this.detailLines = [`status unavailable: ${error instanceof Error ? error.message : String(error)}`]; }
     }
     return previous !== this.detailLines.join("\n");
   }
@@ -348,7 +355,7 @@ function syntheticNode(id: string, related: NodeState[]): NodeState {
 function printable(value: unknown): string { if (typeof value === "string") return value; const json = JSON.stringify(value, null, 2); return json ?? String(value); }
 function glyph(value: string, theme: Theme): string { if (value === "running") return theme.fg("accent", "●"); if (value === "scheduled" || value === "pending") return theme.fg("muted", "◦"); if (value === "completed") return theme.fg("success", "✓"); if (value === "paused" || value === "stopped" || value === "skipped") return theme.fg("warning", "■"); return theme.fg("error", "✗"); }
 function statusText(theme: Theme, value: string): string { return theme.fg(value === "completed" ? "success" : value === "failed" ? "error" : value === "paused" ? "warning" : "accent", value); }
-function styleDetail(line: string, theme: Theme): string { if (/^(Node|Phase|Label|State|Kind|Prompt|Attempts|Agent|Model|Thinking|Recovery|Capabilities|Started|Ended|Current tool|Current path|Tokens|Cost|Async run):/.test(line)) return theme.bold(line); if (/^Error:/.test(line)) return theme.fg("error", line); return line; }
+function styleDetail(line: string, theme: Theme): string { if (/^(Node|Phase|Label|State|Kind|Prompt|Attempts|Agent|Model|Thinking|Recovery|Capabilities|Started|Ended|Current tool|Current path|Tokens|Cost|Runtime run|Session file|Turns|Tool calls):/.test(line)) return theme.bold(line); if (/^Error:/.test(line)) return theme.fg("error", line); return line; }
 function baseId(value: string): string { return value.replace(/\[(?:round-)?\d+\]/g, "").replace(/:(?:verify|repair)(?::\d+)?$/, ""); }
 function fit(text: string, width: number): string { const clipped = truncateToWidth(text, Math.max(0, width)); return clipped + " ".repeat(Math.max(0, width - visibleWidth(clipped))); }
 function rightAligned(left: string, right: string, width: number): string { const rightWidth = visibleWidth(right); const leftWidth = Math.max(0, width - rightWidth - 1); return fit(left, leftWidth) + " ".repeat(Math.max(1, width - leftWidth - rightWidth)) + fit(right, rightWidth); }
