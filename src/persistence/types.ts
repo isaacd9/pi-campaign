@@ -16,7 +16,7 @@ export interface NodeState {
   error?: string;
   promptOverride?: string;
   modelOverride?: { model: string; thinking?: ThinkingLevel };
-  routing?: { model: string; thinking: ThinkingLevel; fallbackModels: string[]; confidence: number; reasons: string[]; source: string };
+  routing?: { model: string; thinking: ThinkingLevel; fallbackModels: string[]; confidence: number; reasons: string[]; expectedStrengths?: string[]; escalationTriggers?: string[]; source: string; cacheKey?: string };
   kernel?: { state: string; currentTool?: string; currentPath?: string; recentOutput?: string[]; model?: string; thinking?: string; tokens?: number; cost?: number };
   rounds?: number;
   roundHashes?: string[];

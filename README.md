@@ -118,11 +118,11 @@ Launching a campaign leaves the parent editor undisturbed and reports compact pr
 
 - an explicit campaign status, deterministic English progress summary, and started/updated timestamps;
 - a phase-labeled execution tree derived from persisted IR edges, with structural nodes, parallel branches, and dynamic instances;
-- selected-agent metadata including the phase, label, full prompt, state, agent, model/thinking, recovery policy, capabilities, timestamps, current tool/path, usage, async identity, errors, and bounded transcript/output tails;
+- selected-agent metadata including the phase, label, full prompt, state, agent, model/thinking, the persisted reason that model was selected, routing confidence/strengths/fallbacks/escalation triggers, recovery policy, capabilities, timestamps, current tool/path, usage, async identity, errors, and bounded transcript/output tails;
 - pause/resume (`p`), stop the selected agent (`x`), stop the whole campaign (`X`), retry (`r`), and skip or gate override (`s`);
 - a persistent per-run Pi SDK session for orchestrator chat, stored under the campaign run directory;
 - read-only `campaign_status` and explicit `campaign_control` tools for the orchestrator; it cannot edit files or run shell commands;
-- `Tab` switches between campaign navigation and chat, with independent transcript scrolling and IME-compatible input;
+- `Tab` cycles the tree, selected-agent detail, and chat panes; from the tree, right arrow or `l` enters detail and left arrow or `h` returns, while up/down or `j`/`k` navigate the focused pane;
 - deterministic local chat commands `/pause`, `/resume`, `/stop-agent`, `/retry`, and `/stop`.
 
 Outside TUI mode, inspection returns formatted JSON status. The generator is explicitly prompted to produce labeled hierarchical phases, fan out independent work with parallel/map/branch nodes, and converge into synthesis or review instead of defaulting to a flat chain.

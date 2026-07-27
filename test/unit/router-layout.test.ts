@@ -7,7 +7,7 @@ import { ControlInput } from "../../src/tui/input.ts";
 import { columns, fit } from "../../src/tui/layout.ts";
 import { CampaignInspector, campaignEnglishSummary } from "../../src/tui/inspector.ts";
 import { initialState } from "../../src/supervisor/reducer.ts";
-test("deterministic router picks smallest sufficient model and clamps thinking", async () => { const models = [{ provider: "p", id: "tiny-mini", reasoning: false, input: ["text"], contextWindow: 100_000, cost: { input: 1, output: 1 } }, { provider: "p", id: "solid-sonnet", reasoning: true, input: ["text", "image"], contextWindow: 200_000, cost: { input: 3, output: 10 } }]; const router = new ModelRouter(models); const scout = await router.route({ taskClass: "scout", prompt: "inspect", risk: "low" }); assert.equal(scout.model, "p/tiny-mini"); assert.equal(scout.thinking, "off"); const implementation = await router.route({ taskClass: "implementation", prompt: "code", risk: "medium" }); assert.equal(implementation.model, "p/solid-sonnet"); assert.equal(implementation.thinking, "medium"); assert.deepEqual(implementation, await router.route({ taskClass: "implementation", prompt: "code", risk: "medium" })); });
+test("deterministic router picks smallest sufficient model and clamps thinking", async () => { const models = [{ provider: "p", id: "tiny-mini", reasoning: false, input: ["text"], contextWindow: 100_000, cost: { input: 1, output: 1 } }, { provider: "p", id: "solid-sonnet", reasoning: true, input: ["text", "image"], contextWindow: 200_000, cost: { input: 3, output: 10 } }]; const router = new ModelRouter(models); const scout = await router.route({ taskClass: "scout", prompt: "inspect", risk: "low" }); assert.equal(scout.model, "p/tiny-mini"); assert.equal(scout.thinking, "off"); const implementation = await router.route({ taskClass: "implementation", prompt: "code", risk: "medium" }); assert.equal(implementation.model, "p/solid-sonnet"); assert.equal(implementation.thinking, "medium"); assert.match(implementation.reasons.join(" "), /requires capability tier/); assert.deepEqual(implementation, await router.route({ taskClass: "implementation", prompt: "code", risk: "medium" })); });
 test("invalid LLM routing output falls back deterministically", async () => { const router = new ModelRouter([{ provider: "p", id: "mini", reasoning: false, input: ["text"], contextWindow: 10 }], async () => ({ model: "evil/missing", thinking: "ultra" })); const decision = await router.route({ taskClass: "router", prompt: "x" }); assert.equal(decision.source, "deterministic"); });
 test("layout never exceeds terminal width", () => { for (const width of [1, 2, 10, 30, 71, 72, 120]) { const lines = columns(["a".repeat(200), "😀 wide"], ["\x1b[31mred content that is very long\x1b[0m"], width); assert.ok(lines.every((line) => visibleWidth(line) <= width)); assert.ok(visibleWidth(fit("x".repeat(100), width)) <= width); const input = new ControlInput(() => undefined); input.setText("long 😀 input ".repeat(20)); const rendered = input.render(width); assert.ok(rendered.every((line) => visibleWidth(line) <= width)); input.handleInput("\u001b"); assert.equal(input.text, ""); } });
 
@@ -15,7 +15,7 @@ test("campaign workspace renders a width-safe fleet and orchestrator chat", () =
   const state = initialState("run", "Inspect architecture", "/tmp");
   state.status = "running";
   state.ir = compileCampaign(`import {defineCampaign,sequence,task} from "pi-campaign/dsl"; export default defineCampaign({meta:{name:"architecture",version:1},limits:{maxAgents:1,maxConcurrency:1,maxRounds:1,maxTokens:100},program:sequence({id:"root",label:"Campaign phases",children:[task({id:"discover",label:"Map project",agent:"scout",prompt:"Inspect the repository",recovery:"safe-retry"})]})});`).ir;
-  state.nodes.discover = { id: "discover", status: "running", attempts: 1, kernelRunId: "kernel-run" };
+  state.nodes.discover = { id: "discover", status: "running", attempts: 1, kernelRunId: "kernel-run", routing: { model: "p/fast-scout", thinking: "low", fallbackModels: ["p/steady-scout"], confidence: 0.8, reasons: ["Selected the smallest sufficient model for read-only discovery."], expectedStrengths: ["fast repository analysis"], escalationTriggers: ["context estimate exceeded"], source: "deterministic" } };
   const component = new CampaignInspector({
     service: { registerUiDisposer: () => () => undefined, getState: async () => state } as never,
     orchestrator: { transcript: [{ role: "assistant", text: "Campaign is running." }], isStreaming: false, subscribe: () => () => undefined } as never,
@@ -44,6 +44,14 @@ test("campaign workspace renders a width-safe fleet and orchestrator chat", () =
   assert.ok(detail.some((line) => line.includes("Phase: architecture")));
   assert.ok(detail.some((line) => line.includes("Agent: scout")));
   assert.ok(detail.some((line) => line.includes("Inspect the repository")));
+  component.handleInput("l");
+  for (let index = 0; index < 7; index++) component.handleInput("j");
+  const scrolledDetail = component.render(120);
+  assert.ok(scrolledDetail.some((line) => line.includes("Focus: detail")));
+  assert.ok(scrolledDetail.some((line) => line.includes("Why this model:")));
+  assert.ok(scrolledDetail.some((line) => line.includes("smallest sufficient model")));
+  component.handleInput("h");
+  assert.ok(component.render(120).some((line) => line.includes("Focus: tree")));
   component.dispose();
 });
 

@@ -45,7 +45,7 @@ export class CampaignInspector implements Component, Focusable {
   private chatAutoFollow = true;
   private bodyHeight = 8;
   private chatHeight = 6;
-  private panel: "campaign" | "chat" = "chat";
+  private panel: "tree" | "detail" | "chat" = "chat";
   private notices: string[] = [];
   private timer: NodeJS.Timeout;
   private renderTimer: NodeJS.Timeout | undefined;
@@ -113,14 +113,18 @@ export class CampaignInspector implements Component, Focusable {
     for (let index = 0; index < this.chatHeight; index++) lines.push(theme.fg("border", "│") + fit(visibleChat[index] ?? "", innerWidth) + theme.fg("border", "│"));
     lines.push(theme.fg("border", "│") + fit(this.input.render(innerWidth)[0] ?? "", innerWidth) + theme.fg("border", "│"));
     lines.push(theme.fg("border", `├${"─".repeat(innerWidth)}┤`));
-    const focus = this.panel === "chat" ? "chat" : "campaign";
-    lines.push(theme.fg("border", "│") + fit(theme.fg("dim", ` Tab focus (${focus}) · ↑↓/jk node · PgUp/PgDn scroll · x stop agent · X stop campaign · p pause · Esc close`), innerWidth) + theme.fg("border", "│"));
+    lines.push(theme.fg("border", "│") + fit(theme.fg("dim", ` Focus: ${this.panel} · Tab cycle · ←→/hl pane · ↑↓/jk navigate · x stop agent · X stop campaign · p pause · Esc close`), innerWidth) + theme.fg("border", "│"));
     lines.push(theme.fg("border", `╰${"─".repeat(innerWidth)}╯`));
     return lines.map((line) => truncateToWidth(line, width));
   }
 
   handleInput(data: string): void {
-    if (matchesKey(data, "tab")) { this.panel = this.panel === "chat" ? "campaign" : "chat"; this.input.focused = this.focused && this.panel === "chat"; this.options.tui.requestRender(); return; }
+    if (matchesKey(data, "tab")) {
+      this.panel = this.panel === "chat" ? "tree" : this.panel === "tree" ? "detail" : "chat";
+      this.input.focused = this.focused && this.panel === "chat";
+      this.options.tui.requestRender();
+      return;
+    }
     if (this.panel === "chat") {
       if (matchesKey(data, "ctrl+c")) { if (this.options.orchestrator.isStreaming) void this.options.orchestrator.abort(); else { this.dispose(); this.options.done(); } return; }
       if (matchesKey(data, "escape") && !this.input.text) { this.dispose(); this.options.done(); return; }
@@ -133,18 +137,27 @@ export class CampaignInspector implements Component, Focusable {
     const rows = this.treeRows();
     const selected = rows[this.selected]?.node;
     if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c") || data === "q") { this.dispose(); this.options.done(); return; }
-    if (matchesKey(data, "up") || data === "k") this.moveSelection(-1, rows.length);
-    else if (matchesKey(data, "down") || data === "j") this.moveSelection(1, rows.length);
-    else if (matchesKey(data, "home")) this.moveSelection(-rows.length, rows.length);
-    else if (matchesKey(data, "end")) this.moveSelection(rows.length, rows.length);
-    else if (matchesKey(data, "pageUp")) { this.detailAutoFollow = false; this.detailScroll = Math.max(0, this.detailScroll - this.bodyHeight); }
-    else if (matchesKey(data, "pageDown")) { this.detailScroll += this.bodyHeight; this.detailAutoFollow = true; }
+    if (this.panel === "tree" && (matchesKey(data, "right") || data === "l")) this.panel = "detail";
+    else if (this.panel === "detail" && (matchesKey(data, "left") || data === "h")) this.panel = "tree";
+    else if (this.panel === "tree" && (matchesKey(data, "up") || data === "k")) this.moveSelection(-1, rows.length);
+    else if (this.panel === "tree" && (matchesKey(data, "down") || data === "j")) this.moveSelection(1, rows.length);
+    else if (this.panel === "tree" && matchesKey(data, "home")) this.moveSelection(-rows.length, rows.length);
+    else if (this.panel === "tree" && matchesKey(data, "end")) this.moveSelection(rows.length, rows.length);
+    else if (this.panel === "tree" && matchesKey(data, "pageUp")) this.moveSelection(-this.bodyHeight, rows.length);
+    else if (this.panel === "tree" && matchesKey(data, "pageDown")) this.moveSelection(this.bodyHeight, rows.length);
+    else if (this.panel === "detail" && (matchesKey(data, "up") || data === "k")) { this.detailAutoFollow = false; this.detailScroll = Math.max(0, this.detailScroll - 1); }
+    else if (this.panel === "detail" && (matchesKey(data, "down") || data === "j")) { this.detailAutoFollow = false; this.detailScroll += 1; }
+    else if (this.panel === "detail" && matchesKey(data, "home")) { this.detailAutoFollow = false; this.detailScroll = 0; }
+    else if (this.panel === "detail" && matchesKey(data, "end")) this.detailAutoFollow = true;
+    else if (this.panel === "detail" && matchesKey(data, "pageUp")) { this.detailAutoFollow = false; this.detailScroll = Math.max(0, this.detailScroll - this.bodyHeight); }
+    else if (this.panel === "detail" && matchesKey(data, "pageDown")) { this.detailAutoFollow = false; this.detailScroll += this.bodyHeight; }
     else if (data === "x" && selected) void this.confirmStopNode(selected);
     else if (data === "X") void this.confirmStopCampaign();
     else if (data === "p") void this.action(this.state.status === "paused" ? this.options.service.resume(this.options.runId) : this.options.service.pause(this.options.runId), this.state.status === "paused" ? "resume requested" : "pause requested");
     else if (data === "r" && selected) void this.action(this.options.service.retry(this.options.runId, selected.id), `retry ${selected.id}`);
     else if (data === "s" && selected) void this.confirmSkipOrOverride(selected.id);
     else if (data === "c" || data === "i" || data === "/") { this.panel = "chat"; this.input.focused = this.focused; if (data === "/") this.input.setText("/"); }
+    this.input.focused = this.focused && this.panel === "chat";
     this.options.tui.requestRender();
   }
 
@@ -195,7 +208,7 @@ export class CampaignInspector implements Component, Focusable {
     const start = Math.max(0, Math.min(this.selected - this.bodyHeight + 1, Math.max(0, rows.length - this.bodyHeight)));
     return rows.slice(start, start + this.bodyHeight).map((row, offset) => {
       const index = start + offset;
-      const marker = index === this.selected ? this.options.theme.fg("accent", "›") : " ";
+      const marker = index === this.selected ? this.options.theme.fg("accent", this.panel === "detail" ? "→" : "›") : " ";
       const branch = row.depth ? `${"  ".repeat(Math.max(0, row.depth - 1))}${row.last ? "└─" : "├─"}` : "";
       const title = row.structural ? this.options.theme.bold(row.title) : row.title;
       const left = `${marker} ${glyph(row.node.status, this.options.theme)} ${branch}${title}`;
@@ -208,20 +221,40 @@ export class CampaignInspector implements Component, Focusable {
     const { node, irNode } = row;
     const artifact = this.detailStatus?.raw as { sessionFile?: string; turns?: number; toolCalls?: number } | undefined;
     const prompt = node.promptOverride ?? (irNode?.kind === "agent-task" ? printable(irNode.prompt) : undefined);
+    const routing = node.routing;
+    const assignment = irNode?.kind === "agent-task" || Boolean(node.kernelRunId || routing || node.id.startsWith("campaign-generator"));
+    const agentName = irNode?.kind === "agent-task" ? irNode.agent : runtimeAgentName(node.id);
+    const configuredModel = node.modelOverride?.model ?? (irNode?.kind === "agent-task" ? irNode.model : undefined) ?? routing?.model;
+    const selectedModel = node.kernel?.model ?? configuredModel ?? "active Pi model";
+    const configuredThinking = node.modelOverride?.thinking ?? (irNode?.kind === "agent-task" ? irNode.thinking : undefined) ?? routing?.thinking;
+    const selectedThinking = node.kernel?.thinking ?? configuredThinking ?? "automatic";
+    const modelWhy = node.modelOverride
+      ? ["Selected by an explicit user override in the Campaign inspector."]
+      : irNode?.kind === "agent-task" && irNode.model
+        ? [node.kernel?.model && node.kernel.model !== irNode.model ? `The configured model was ${irNode.model}; ${node.kernel.model} is the retry fallback used for this attempt.` : "Explicitly requested by the compiled campaign definition."]
+        : routing
+          ? (node.kernel?.model && node.kernel.model !== routing.model ? [`The router selected ${routing.model}; ${node.kernel.model} is the retry fallback used for this attempt.`] : routing.reasons)
+          : ["No campaign-specific route was persisted, so the active Pi model was used as the runtime default."];
+    if (!modelWhy.length) modelWhy.push("The router returned no explanatory rationale; selection was based on its eligible-model ranking.");
     const raw = [
       `Node: ${node.id}`,
       `Phase: ${row.phase}`,
       `Label: ${irNode?.label ?? row.title}`,
       `State: ${node.status}`,
       `Kind: ${irNode?.kind ?? "generator/runtime"}`,
-      ...(irNode?.kind === "agent-task" ? [`Agent: ${irNode.agent}`] : []),
+      ...(assignment ? [`Agent: ${agentName}`] : []),
       ...(prompt ? [this.options.theme.fg("accent", "Prompt:"), ...prompt.split("\n"), ""] : []),
       `Attempts: ${node.attempts}`,
-      ...(irNode?.kind === "agent-task" ? [
-        `Model: ${node.modelOverride?.model ?? node.routing?.model ?? irNode.model ?? "automatic"}`,
-        `Thinking: ${node.modelOverride?.thinking ?? node.routing?.thinking ?? irNode.thinking ?? node.kernel?.thinking ?? "automatic"}`,
-        `Recovery: ${irNode.recovery}`,
-        `Capabilities: ${irNode.capabilities.length ? irNode.capabilities.join(", ") : "read-only/default"}`,
+      ...(assignment ? [
+        `Model: ${selectedModel}`,
+        `Thinking: ${selectedThinking}`,
+        `Model selection: ${node.modelOverride ? "manual override" : irNode?.kind === "agent-task" && irNode.model ? "campaign definition" : routing ? `${routing.source} router · ${Math.round(routing.confidence * 100)}% confidence` : "runtime default"}`,
+        this.options.theme.fg("accent", "Why this model:"),
+        ...modelWhy.map((reason) => `• ${reason}`),
+        ...(routing?.expectedStrengths?.length ? [`Expected strengths: ${routing.expectedStrengths.join(", ")}`] : []),
+        ...(routing?.fallbackModels.length ? [`Fallbacks: ${routing.fallbackModels.join(", ")}`] : []),
+        ...(routing?.escalationTriggers?.length ? [`Escalate when: ${routing.escalationTriggers.join("; ")}`] : []),
+        ...(irNode?.kind === "agent-task" ? [`Recovery: ${irNode.recovery}`, `Capabilities: ${irNode.capabilities.length ? irNode.capabilities.join(", ") : "read-only/default"}`] : []),
       ] : []),
       ...(node.startedAt ? [`Started: ${formatTimestamp(node.startedAt)}`] : []),
       ...(node.endedAt ? [`Ended: ${formatTimestamp(node.endedAt)}`] : []),
@@ -341,6 +374,7 @@ function childIds(node: CampaignNode): string[] {
 }
 function isComposite(node: CampaignNode): boolean { return ["sequence", "parallel", "map", "branch", "loop"].includes(node.kind); }
 function kindLabel(kind: CampaignNode["kind"]): string { return kind === "agent-task" ? "Agent" : kind.charAt(0).toUpperCase() + kind.slice(1); }
+function runtimeAgentName(id: string): string { if (id.startsWith("campaign-generator")) return "campaign-generator"; if (id.startsWith("review-gate") || id.includes(":verify")) return "reviewer"; if (id.includes(":repair")) return "worker"; return "runtime assignment"; }
 function syntheticNode(id: string, related: NodeState[]): NodeState {
   const statuses = related.map((node) => node.status);
   let status: NodeStatus = "pending";
@@ -355,7 +389,7 @@ function syntheticNode(id: string, related: NodeState[]): NodeState {
 function printable(value: unknown): string { if (typeof value === "string") return value; const json = JSON.stringify(value, null, 2); return json ?? String(value); }
 function glyph(value: string, theme: Theme): string { if (value === "running") return theme.fg("accent", "●"); if (value === "scheduled" || value === "pending") return theme.fg("muted", "◦"); if (value === "completed") return theme.fg("success", "✓"); if (value === "paused" || value === "stopped" || value === "skipped") return theme.fg("warning", "■"); return theme.fg("error", "✗"); }
 function statusText(theme: Theme, value: string): string { return theme.fg(value === "completed" ? "success" : value === "failed" ? "error" : value === "paused" ? "warning" : "accent", value); }
-function styleDetail(line: string, theme: Theme): string { if (/^(Node|Phase|Label|State|Kind|Prompt|Attempts|Agent|Model|Thinking|Recovery|Capabilities|Started|Ended|Current tool|Current path|Tokens|Cost|Runtime run|Session file|Turns|Tool calls):/.test(line)) return theme.bold(line); if (/^Error:/.test(line)) return theme.fg("error", line); return line; }
+function styleDetail(line: string, theme: Theme): string { if (/^(Node|Phase|Label|State|Kind|Prompt|Attempts|Agent|Model|Model selection|Why this model|Thinking|Expected strengths|Fallbacks|Escalate when|Recovery|Capabilities|Started|Ended|Current tool|Current path|Tokens|Cost|Runtime run|Session file|Turns|Tool calls):/.test(line)) return theme.bold(line); if (/^Error:/.test(line)) return theme.fg("error", line); return line; }
 function baseId(value: string): string { return value.replace(/\[(?:round-)?\d+\]/g, "").replace(/:(?:verify|repair)(?::\d+)?$/, ""); }
 function fit(text: string, width: number): string { const clipped = truncateToWidth(text, Math.max(0, width)); return clipped + " ".repeat(Math.max(0, width - visibleWidth(clipped))); }
 function rightAligned(left: string, right: string, width: number): string { const rightWidth = visibleWidth(right); const leftWidth = Math.max(0, width - rightWidth - 1); return fit(left, leftWidth) + " ".repeat(Math.max(1, width - leftWidth - rightWidth)) + fit(right, rightWidth); }

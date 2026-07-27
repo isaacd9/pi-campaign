@@ -487,7 +487,7 @@ Responsive layouts collapse to tabs on narrow terminals. Every rendered line mus
 - recent tools and current tool/path;
 - transcript/result viewer;
 - gate evidence and override history;
-- model decision, alternatives, and escalation history;
+- model decision with a human-readable selection rationale, confidence, expected strengths, alternatives, and escalation history;
 - artifacts;
 - event timeline;
 - aggregate token/cost/time view; and
@@ -495,9 +495,11 @@ Responsive layouts collapse to tabs on narrow terminals. Every rendered line mus
 
 ### 12.3 Controls
 
-- arrows or `j/k`: navigate/scroll;
-- Enter/right: drill in;
-- Escape/left: back;
+- in the tree, up/down or `j/k`: select a phase or assignment;
+- right or `l`: focus the selected assignment's detail pane;
+- in detail, up/down or `j/k`: scroll metadata, routing rationale, transcript, and output;
+- left or `h`: return from detail to the tree;
+- Escape: close the inspector without stopping the campaign;
 - `p`: pause/resume campaign;
 - `x`: stop selected node or run;
 - `r`: retry selected node;
