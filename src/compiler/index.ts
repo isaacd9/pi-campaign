@@ -58,6 +58,7 @@ class Builder {
     let node: CampaignNode;
     switch (call.$call) {
       case "task": {
+        rejectPlainInterpolation(config.prompt, `${id}.prompt`, this.diagnostics, call.range);
         node = { ...common, kind: "agent-task", agent: string(config.agent, `${id}.agent`, this.diagnostics), prompt: expression(config.prompt), ...(isObject(config.output) ? { outputSchema: plain(config.output) as Record<string, unknown> } : {}), capabilities: stringArray(config.capabilities), recovery: recovery(config.recovery, this.diagnostics, `${id}.recovery`, stringArray(config.capabilities).includes("code-write") || ["worker", "implementer"].includes(String(config.agent))), ...(typeof config.model === "string" ? { model: config.model } : {}), ...(Array.isArray(config.fallbackModels) ? { fallbackModels: stringArray(config.fallbackModels) } : {}), ...(typeof config.thinking === "string" ? { thinking: config.thinking as never } : {}), ...(isObject(config.acceptance) ? { acceptance: plain(config.acceptance) as Record<string, unknown> } : {}), ...(config.isolation === "worktree" ? { isolation: "worktree" } : {}) };
         this.outputs[id] = { nodeId: id, ...(node.outputSchema ? { schema: node.outputSchema } : {}) }; break;
       }
@@ -73,7 +74,7 @@ class Builder {
       case "repeatUntil": { const body = requiredCall(config.body, `${id}.body`, this.diagnostics); const bodyId = this.add(body); node = { ...common, kind: "loop", body: bodyId, until: predicate(config.until), maxRounds: integer(config.maxRounds, `${id}.maxRounds`, this.diagnostics), ...(typeof config.timeoutMs === "number" ? { timeoutMs: config.timeoutMs } : {}), ...(config.noProgress === true ? { noProgress: true } : {}) }; this.edges.push({ from: id, to: bodyId, type: "body" }); break; }
       case "gate": node = { ...common, kind: "gate", check: gateCheck(config.check, this.diagnostics), overridable: config.overridable === true, ...(typeof config.timeoutMs === "number" ? { timeoutMs: config.timeoutMs } : {}), onFail: failure(config.onFail, this.diagnostics, `${id}.onFail`), onError: failure(config.onError ?? { action: "stop" }, this.diagnostics, `${id}.onError`) }; break;
       case "checkpoint": node = { ...common, kind: "checkpoint", name: typeof config.name === "string" ? config.name : id }; break;
-      case "emit": node = { ...common, kind: "emit", message: expression(config.message), final: config.final === true }; break;
+      case "emit": rejectPlainInterpolation(config.message, `${id}.message`, this.diagnostics, call.range); node = { ...common, kind: "emit", message: expression(config.message), final: config.final === true }; break;
       case "aggregate": node = { ...common, kind: "aggregate", inputs: Array.isArray(config.inputs) ? config.inputs.map(expression) : [], reducer: ["array", "object", "concat"].includes(String(config.reducer)) ? config.reducer as "array" : "array", ...(isObject(config.output) ? { outputSchema: plain(config.output) as Record<string, unknown> } : {}) }; this.outputs[id] = { nodeId: id, ...(node.outputSchema ? { schema: node.outputSchema } : {}) }; break;
       default: this.diagnostics.push({ code: "unknown-combinator", message: `Unsupported program combinator '${call.$call}'.`, range: call.range }); node = { ...common, kind: "checkpoint", name: id };
     }
@@ -99,6 +100,9 @@ function callValue(call: ParsedCall): unknown {
   return { type: suffix, ...(isObject(call.args[0]) ? plain(call.args[0]) as object : {}) };
 }
 function expression(value: ParsedValue | undefined): ValueExpression { return plain(value ?? null) as ValueExpression; }
+function rejectPlainInterpolation(value: ParsedValue | undefined, path: string, diagnostics: CompileDiagnostic[], range: ParsedCall["range"]): void {
+  if (typeof value === "string" && /\{\{\s*[a-zA-Z0-9_.-]+\s*\}\}/.test(value)) diagnostics.push({ code: "unresolved-interpolation", message: `${path} contains {{...}} interpolation in a plain string.`, hint: "Wrap interpolated strings with template(...).", range });
+}
 function gateCheck(value: ParsedValue | undefined, diagnostics: CompileDiagnostic[]): GateCheck { const result = plain(value ?? null); if (!isObject(result) || typeof result.type !== "string") { diagnostics.push({ code: "invalid-gate", message: "Gate check must use a gate helper such as commandGate({...})." }); return { type: "predicate", predicate: { op: "truthy", value: false } }; } return result as unknown as GateCheck; }
 function predicate(value: ParsedValue | undefined): Predicate { return plain(value ?? { op: "truthy", value: false }) as Predicate; }
 function failure(value: ParsedValue | undefined, diagnostics: CompileDiagnostic[], path: string): FailureAction { const objectValue = object(value, path, diagnostics); const action = typeof objectValue.action === "string" ? objectValue.action : "stop"; if (!["stop", "skip", "retry", "repair", "pause"].includes(action)) diagnostics.push({ code: "invalid-failure", message: `${path}.action is invalid.` }); return { action: action as FailureAction["action"], ...(typeof objectValue.maxAttempts === "number" ? { maxAttempts: objectValue.maxAttempts } : {}) }; }

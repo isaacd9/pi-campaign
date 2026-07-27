@@ -214,7 +214,7 @@ export class CampaignSupervisor {
       const perform = async () => {
         this.assertWithinCampaignDeadline();
         const assignmentTimeout = this.remainingCampaignMs();
-        const run = await this.kernel.spawn({ agent: node.agent, task: prompt, cwd: this.state.cwd, phase: node.label ?? node.id, label: node.id, ...(selectedModel ? { model: selectedModel } : {}), ...(selectedThinking ? { thinking: selectedThinking } : {}), worktree: node.isolation === "worktree", outputPath: join(this.store.runDir, "subagents", `${fileId(instanceId)}.txt`), ...(assignmentTimeout !== undefined ? { timeoutMs: assignmentTimeout } : {}), ...(node.outputSchema ? { outputSchema: node.outputSchema } : {}), ...(node.acceptance ? { acceptance: node.acceptance } : {}) });
+        const run = await this.kernel.spawn({ agent: node.agent, task: prompt, cwd: this.state.cwd, phase: node.label ?? node.id, label: node.id, ...(selectedModel ? { model: selectedModel } : {}), ...(selectedThinking ? { thinking: selectedThinking } : {}), worktree: node.isolation === "worktree", outputPath: join(this.store.runDir, "subagents", `${fileId(instanceId)}.txt`), ...(assignmentTimeout !== undefined ? { timeoutMs: assignmentTimeout } : {}), ...(node.outputSchema ? { outputSchema: node.outputSchema } : {}), acceptance: node.acceptance ?? { level: "none", reason: "Campaign captures assignment output and validates it with first-class campaign gates." } });
         await this.store.append("node.started", { nodeId: instanceId, kernelRunId: run.id, asyncDir: run.asyncDir });
         const status = await this.waitForKernel(run, instanceId);
         await this.recordUsage(run.id, status);

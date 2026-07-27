@@ -1,6 +1,7 @@
 import { matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component, type Focusable, type TUI } from "@earendil-works/pi-tui";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { CampaignState, NodeState } from "../persistence/types.ts";
+import type { CampaignState, NodeState, NodeStatus } from "../persistence/types.ts";
+import type { CampaignNode } from "../dsl/types.ts";
 import type { CampaignService } from "../commands/service.ts";
 import type { CampaignOrchestratorSession, OrchestratorLine } from "../orchestrator/session.ts";
 import { readSubagentStatus } from "../adapters/subagents-artifacts-v2.ts";
@@ -10,6 +11,16 @@ const REFRESH_MS = 1_000;
 const RENDER_THROTTLE_MS = 120;
 const TRANSCRIPT_LINES = 300;
 type Theme = ExtensionContext["ui"]["theme"];
+interface TreeRow {
+  key: string;
+  node: NodeState;
+  irNode?: CampaignNode;
+  depth: number;
+  last: boolean;
+  phase: string;
+  title: string;
+  structural: boolean;
+}
 interface InspectorOptions {
   service: CampaignService;
   orchestrator: CampaignOrchestratorSession;
@@ -28,7 +39,7 @@ export class CampaignInspector implements Component, Focusable {
   private selectedKey: string | undefined;
   private detailLines: string[] = [];
   private detailScroll = 0;
-  private detailAutoFollow = true;
+  private detailAutoFollow = false;
   private chatScroll = 0;
   private chatAutoFollow = true;
   private bodyHeight = 8;
@@ -50,6 +61,10 @@ export class CampaignInspector implements Component, Focusable {
 
   constructor(private options: InspectorOptions) {
     this.state = options.initial;
+    const initialRows = this.treeRows();
+    const preferred = initialRows.findIndex((row) => !row.structural && (row.node.status === "running" || row.node.status === "scheduled"));
+    this.selected = preferred >= 0 ? preferred : 0;
+    this.selectedKey = initialRows[this.selected]?.key;
     this.input = new ControlInput((value) => void this.submit(value));
     this.input.focused = true;
     this.unregister = options.service.registerUiDisposer(() => this.dispose());
@@ -63,19 +78,19 @@ export class CampaignInspector implements Component, Focusable {
     if (width < 44) return [truncateToWidth("Campaign workspace needs at least 44 columns. Esc closes.", width)];
     const theme = this.options.theme;
     const innerWidth = width - 2;
-    const rows = this.options.tui.terminal?.rows ?? 32;
+    const terminalRows = this.options.tui.terminal?.rows ?? 32;
     // Leave room for Pi/tmux chrome. Filling the physical terminal exactly
     // makes the final row wrap and forces a visible full-screen repaint.
-    const workspaceRows = Math.max(12, rows - 6);
+    const workspaceRows = Math.max(12, terminalRows - 6);
     const usable = Math.max(4, workspaceRows - 12);
     this.bodyHeight = Math.max(2, Math.floor(usable * 0.52));
     this.chatHeight = Math.max(2, usable - this.bodyHeight);
     const rosterWidth = Math.max(24, Math.min(48, Math.floor((innerWidth - 1) * 0.38)));
     const detailWidth = Math.max(1, innerWidth - rosterWidth - 1);
-    const nodes = this.nodes();
-    if (this.selected >= nodes.length) this.selected = Math.max(0, nodes.length - 1);
-    const roster = this.rosterLines(nodes, rosterWidth);
-    const detail = this.wrappedDetail(nodes[this.selected], detailWidth);
+    const rows = this.treeRows();
+    if (this.selected >= rows.length) this.selected = Math.max(0, rows.length - 1);
+    const roster = this.rosterLines(rows, rosterWidth);
+    const detail = this.wrappedDetail(rows[this.selected], detailWidth);
     const maxDetailScroll = Math.max(0, detail.length - this.bodyHeight);
     if (this.detailAutoFollow) this.detailScroll = maxDetailScroll;
     else this.detailScroll = Math.min(this.detailScroll, maxDetailScroll);
@@ -114,13 +129,13 @@ export class CampaignInspector implements Component, Focusable {
       this.options.tui.requestRender();
       return;
     }
-    const nodes = this.nodes();
-    const selected = nodes[this.selected];
+    const rows = this.treeRows();
+    const selected = rows[this.selected]?.node;
     if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c") || data === "q") { this.dispose(); this.options.done(); return; }
-    if (matchesKey(data, "up") || data === "k") this.moveSelection(-1, nodes.length);
-    else if (matchesKey(data, "down") || data === "j") this.moveSelection(1, nodes.length);
-    else if (matchesKey(data, "home")) this.moveSelection(-nodes.length, nodes.length);
-    else if (matchesKey(data, "end")) this.moveSelection(nodes.length, nodes.length);
+    if (matchesKey(data, "up") || data === "k") this.moveSelection(-1, rows.length);
+    else if (matchesKey(data, "down") || data === "j") this.moveSelection(1, rows.length);
+    else if (matchesKey(data, "home")) this.moveSelection(-rows.length, rows.length);
+    else if (matchesKey(data, "end")) this.moveSelection(rows.length, rows.length);
     else if (matchesKey(data, "pageUp")) { this.detailAutoFollow = false; this.detailScroll = Math.max(0, this.detailScroll - this.bodyHeight); }
     else if (matchesKey(data, "pageDown")) { this.detailScroll += this.bodyHeight; this.detailAutoFollow = true; }
     else if (data === "x" && selected) void this.confirmStopNode(selected);
@@ -135,34 +150,88 @@ export class CampaignInspector implements Component, Focusable {
   invalidate(): void {}
   dispose(): void { if (this.disposed) return; this.disposed = true; clearInterval(this.timer); if (this.renderTimer) clearTimeout(this.renderTimer); this.renderTimer = undefined; this.unregister?.(); this.unsubscribeOrchestrator?.(); this.unregister = undefined; this.unsubscribeOrchestrator = undefined; }
 
-  private nodes(): NodeState[] { return Object.values(this.state.nodes); }
-  private moveSelection(delta: number, count: number): void { if (!count) return; this.selected = Math.max(0, Math.min(count - 1, this.selected + delta)); this.selectedKey = this.nodes()[this.selected]?.id; this.detailAutoFollow = true; void this.refreshDetail().then((changed) => { if (changed) this.scheduleRender(); }); }
+  private treeRows(): TreeRow[] {
+    const runtime = Object.values(this.state.nodes);
+    if (!this.state.ir) return runtime.map((node, index) => ({ key: node.id, node, depth: 0, last: index === runtime.length - 1, phase: "Generation", title: node.id, structural: false }));
+    const byId = new Map(this.state.ir.nodes.map((node) => [node.id, node]));
+    const rows: TreeRow[] = [];
+    const claimed = new Set<string>();
+    const generator = runtime.filter((node) => node.id.startsWith("campaign-generator"));
+    generator.forEach((node, index) => { claimed.add(node.id); rows.push({ key: node.id, node, depth: 0, last: index === generator.length - 1, phase: "Generation", title: `Generation · ${node.id}`, structural: false }); });
+    const descendantCache = new Map<string, Set<string>>();
+    const descendants = (id: string): Set<string> => {
+      const cached = descendantCache.get(id); if (cached) return cached;
+      const result = new Set([id]); descendantCache.set(id, result);
+      const definition = byId.get(id);
+      for (const child of definition ? childIds(definition) : []) for (const nested of descendants(child)) result.add(nested);
+      return result;
+    };
+    const visit = (id: string, depth: number, last: boolean, inheritedPhase: string): void => {
+      const irNode = byId.get(id); if (!irNode) return;
+      const direct = runtime.filter((node) => baseId(node.id) === id);
+      direct.forEach((node) => claimed.add(node.id));
+      const subtree = descendants(id);
+      const related = runtime.filter((node) => subtree.has(baseId(node.id)));
+      const exact = direct.find((node) => node.id === id);
+      const node = exact ?? syntheticNode(id, related);
+      const title = irNode.label ?? (id === this.state.ir!.root ? this.state.ir!.meta.name : `${kindLabel(irNode.kind)} · ${id}`);
+      const phase = id === this.state.ir!.root ? this.state.ir!.meta.name : (isComposite(irNode) ? title : inheritedPhase);
+      rows.push({ key: id, node, irNode, depth, last, phase, title, structural: irNode.kind !== "agent-task" });
+      const children = childIds(irNode);
+      children.forEach((child, index) => visit(child, depth + 1, index === children.length - 1 && direct.length <= (exact ? 1 : 0), phase));
+      const instances = direct.filter((candidate) => candidate.id !== id);
+      instances.forEach((instance, index) => rows.push({ key: instance.id, node: instance, irNode, depth: depth + 1, last: index === instances.length - 1, phase, title: instance.id, structural: false }));
+    };
+    visit(this.state.ir.root, 0, true, this.state.ir.meta.name);
+    const extra = runtime.filter((node) => !claimed.has(node.id));
+    extra.forEach((node, index) => rows.push({ key: node.id, node, ...(byId.get(baseId(node.id)) ? { irNode: byId.get(baseId(node.id))! } : {}), depth: 1, last: index === extra.length - 1, phase: "Runtime support", title: node.id, structural: false }));
+    return rows;
+  }
+  private moveSelection(delta: number, count: number): void { if (!count) return; this.selected = Math.max(0, Math.min(count - 1, this.selected + delta)); this.selectedKey = this.treeRows()[this.selected]?.key; this.detailAutoFollow = false; this.detailScroll = 0; void this.refreshDetail().then((changed) => { if (changed) this.scheduleRender(); }); }
 
-  private rosterLines(nodes: NodeState[], width: number): string[] {
-    if (!nodes.length) return [this.options.theme.fg("dim", " No campaign nodes yet")];
-    const start = Math.max(0, Math.min(this.selected - this.bodyHeight + 1, Math.max(0, nodes.length - this.bodyHeight)));
-    return nodes.slice(start, start + this.bodyHeight).map((node, offset) => {
+  private rosterLines(rows: TreeRow[], width: number): string[] {
+    if (!rows.length) return [this.options.theme.fg("dim", " No campaign nodes yet")];
+    const start = Math.max(0, Math.min(this.selected - this.bodyHeight + 1, Math.max(0, rows.length - this.bodyHeight)));
+    return rows.slice(start, start + this.bodyHeight).map((row, offset) => {
       const index = start + offset;
       const marker = index === this.selected ? this.options.theme.fg("accent", "›") : " ";
-      const left = `${marker} ${glyph(node.status, this.options.theme)} ${node.id}`;
-      return rightAligned(left, this.options.theme.fg("dim", node.status), width);
+      const branch = row.depth ? `${"  ".repeat(Math.max(0, row.depth - 1))}${row.last ? "└─" : "├─"}` : "";
+      const title = row.structural ? this.options.theme.bold(row.title) : row.title;
+      const left = `${marker} ${glyph(row.node.status, this.options.theme)} ${branch}${title}`;
+      return rightAligned(left, this.options.theme.fg("dim", row.node.status), width);
     });
   }
 
-  private wrappedDetail(node: NodeState | undefined, width: number): string[] {
-    if (!node) return [this.options.theme.fg("dim", "Waiting for the generator to publish its first campaign node…")];
-    const irNode = this.state.ir?.nodes.find((candidate) => candidate.id === baseId(node.id));
+  private wrappedDetail(row: TreeRow | undefined, width: number): string[] {
+    if (!row) return [this.options.theme.fg("dim", "Waiting for the generator to publish its first campaign node…")];
+    const { node, irNode } = row;
+    const prompt = node.promptOverride ?? (irNode?.kind === "agent-task" ? printable(irNode.prompt) : undefined);
     const raw = [
       `Node: ${node.id}`,
+      `Phase: ${row.phase}`,
+      `Label: ${irNode?.label ?? row.title}`,
       `State: ${node.status}`,
       `Kind: ${irNode?.kind ?? "generator/runtime"}`,
+      ...(irNode?.kind === "agent-task" ? [`Agent: ${irNode.agent}`] : []),
+      ...(prompt ? [this.options.theme.fg("accent", "Prompt:"), ...prompt.split("\n"), ""] : []),
       `Attempts: ${node.attempts}`,
-      ...(irNode?.kind === "agent-task" ? [`Agent: ${irNode.agent}`, `Model: ${node.modelOverride?.model ?? node.routing?.model ?? irNode.model ?? "automatic"}`] : []),
+      ...(irNode?.kind === "agent-task" ? [
+        `Model: ${node.modelOverride?.model ?? node.routing?.model ?? irNode.model ?? "automatic"}`,
+        `Thinking: ${node.modelOverride?.thinking ?? node.routing?.thinking ?? irNode.thinking ?? node.kernel?.thinking ?? "automatic"}`,
+        `Recovery: ${irNode.recovery}`,
+        `Capabilities: ${irNode.capabilities.length ? irNode.capabilities.join(", ") : "read-only/default"}`,
+      ] : []),
+      ...(node.startedAt ? [`Started: ${formatTimestamp(node.startedAt)}`] : []),
+      ...(node.endedAt ? [`Ended: ${formatTimestamp(node.endedAt)}`] : []),
+      ...(node.kernel?.currentTool ? [`Current tool: ${node.kernel.currentTool}`] : []),
+      ...(node.kernel?.currentPath ? [`Current path: ${node.kernel.currentPath}`] : []),
+      ...(node.kernel?.tokens !== undefined ? [`Tokens: ${node.kernel.tokens}`] : []),
+      ...(node.kernel?.cost !== undefined ? [`Cost: $${node.kernel.cost.toFixed(4)}`] : []),
       ...(node.kernelRunId ? [`Async run: ${node.kernelRunId}`] : []),
       ...(node.error ? [`Error: ${node.error}`] : []),
       "",
       this.options.theme.fg("accent", "Transcript / output"),
-      ...(this.detailLines.length ? this.detailLines : node.output !== undefined ? JSON.stringify(node.output, null, 2).split("\n") : ["(waiting for output)"]),
+      ...(this.detailLines.length ? this.detailLines : node.output !== undefined ? printable(node.output).split("\n") : row.structural ? ["(phase metadata; select a child agent for its live transcript)"] : ["(waiting for output)"]),
     ];
     return raw.flatMap((line) => wrapTextWithAnsi(styleDetail(line, this.options.theme), Math.max(1, width)) || [""]);
   }
@@ -182,14 +251,14 @@ export class CampaignInspector implements Component, Focusable {
     if (this.disposed || this.refreshing) return;
     this.refreshing = true;
     try {
-      const previous = this.nodes()[this.selected]?.id ?? this.selectedKey;
+      const previous = this.treeRows()[this.selected]?.key ?? this.selectedKey;
       const priorUpdatedAt = this.state.updatedAt;
       const priorStatus = this.state.status;
       this.state = await this.options.service.getState(this.options.runId);
-      const nodes = this.nodes();
-      const preserved = previous ? nodes.findIndex((node) => node.id === previous) : -1;
-      this.selected = preserved >= 0 ? preserved : Math.min(this.selected, Math.max(0, nodes.length - 1));
-      this.selectedKey = nodes[this.selected]?.id;
+      const rows = this.treeRows();
+      const preserved = previous ? rows.findIndex((row) => row.key === previous) : -1;
+      this.selected = preserved >= 0 ? preserved : Math.min(this.selected, Math.max(0, rows.length - 1));
+      this.selectedKey = rows[this.selected]?.key;
       const detailChanged = await this.refreshDetail();
       if (detailChanged || priorUpdatedAt !== this.state.updatedAt || priorStatus !== this.state.status) this.scheduleRender();
     } catch (error) { this.notices.push(`refresh failed: ${error instanceof Error ? error.message : String(error)}`); this.scheduleRender(); }
@@ -198,7 +267,7 @@ export class CampaignInspector implements Component, Focusable {
 
   private async refreshDetail(): Promise<boolean> {
     const previous = this.detailLines.join("\n");
-    const node = this.nodes()[this.selected];
+    const node = this.treeRows()[this.selected]?.node;
     if (!node?.asyncDir) { this.detailLines = []; return previous !== ""; }
     try {
       const status = await readSubagentStatus(node.asyncDir);
@@ -257,9 +326,29 @@ export class CampaignInspector implements Component, Focusable {
   private async action(promise: Promise<void>, label: string): Promise<void> { try { await promise; this.notices.push(label); } catch (error) { this.notices.push(error instanceof Error ? error.message : String(error)); } await this.refresh(); }
 }
 
+function childIds(node: CampaignNode): string[] {
+  if (node.kind === "sequence" || node.kind === "parallel") return node.children;
+  if (node.kind === "map" || node.kind === "loop") return [node.body];
+  if (node.kind === "branch") return [node.then, ...(node.else ? [node.else] : [])];
+  return [];
+}
+function isComposite(node: CampaignNode): boolean { return ["sequence", "parallel", "map", "branch", "loop"].includes(node.kind); }
+function kindLabel(kind: CampaignNode["kind"]): string { return kind === "agent-task" ? "Agent" : kind.charAt(0).toUpperCase() + kind.slice(1); }
+function syntheticNode(id: string, related: NodeState[]): NodeState {
+  const statuses = related.map((node) => node.status);
+  let status: NodeStatus = "pending";
+  if (statuses.includes("failed")) status = "failed";
+  else if (statuses.includes("interrupted")) status = "interrupted";
+  else if (statuses.includes("running")) status = "running";
+  else if (statuses.includes("paused")) status = "paused";
+  else if (statuses.includes("scheduled")) status = "scheduled";
+  else if (statuses.length && statuses.every((value) => value === "completed" || value === "skipped")) status = "completed";
+  return { id, status, attempts: 0 };
+}
+function printable(value: unknown): string { if (typeof value === "string") return value; const json = JSON.stringify(value, null, 2); return json ?? String(value); }
 function glyph(value: string, theme: Theme): string { if (value === "running") return theme.fg("accent", "●"); if (value === "scheduled" || value === "pending") return theme.fg("muted", "◦"); if (value === "completed") return theme.fg("success", "✓"); if (value === "paused" || value === "stopped" || value === "skipped") return theme.fg("warning", "■"); return theme.fg("error", "✗"); }
 function statusText(theme: Theme, value: string): string { return theme.fg(value === "completed" ? "success" : value === "failed" ? "error" : value === "paused" ? "warning" : "accent", value); }
-function styleDetail(line: string, theme: Theme): string { if (/^(Node|State|Kind|Attempts|Agent|Model|Async run):/.test(line)) return theme.bold(line); if (/^Error:/.test(line)) return theme.fg("error", line); return line; }
+function styleDetail(line: string, theme: Theme): string { if (/^(Node|Phase|Label|State|Kind|Prompt|Attempts|Agent|Model|Thinking|Recovery|Capabilities|Started|Ended|Current tool|Current path|Tokens|Cost|Async run):/.test(line)) return theme.bold(line); if (/^Error:/.test(line)) return theme.fg("error", line); return line; }
 function baseId(value: string): string { return value.replace(/\[(?:round-)?\d+\]/g, "").replace(/:(?:verify|repair)(?::\d+)?$/, ""); }
 function fit(text: string, width: number): string { const clipped = truncateToWidth(text, Math.max(0, width)); return clipped + " ".repeat(Math.max(0, width - visibleWidth(clipped))); }
 function rightAligned(left: string, right: string, width: number): string { const rightWidth = visibleWidth(right); const leftWidth = Math.max(0, width - rightWidth - 1); return fit(left, leftWidth) + " ".repeat(Math.max(1, width - leftWidth - rightWidth)) + fit(right, rightWidth); }

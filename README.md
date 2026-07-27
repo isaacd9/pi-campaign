@@ -113,15 +113,16 @@ Saved definitions live in `~/.pi/agent/campaigns/*.campaign.ts` and trusted-proj
 
 Launching a campaign leaves the parent editor undisturbed and reports compact progress only in Pi's footer status line. If the configured launch policy requires approval, the compiled campaign pauses durably instead of opening a late modal; open `/campaign-inspect` and press `p` to approve and launch it. `/campaign-inspect` explicitly opens the dedicated Campaign workspace built from the proven `pi-subagents` fleet layout and overlay-compositor patterns. Closing it never stops the background supervisor. Campaign milestones remain in durable campaign state instead of being injected into parent-chat context. The campaign—not the parent Pi chat—is the first-class object:
 
-- an explicit campaign status, deterministic English progress summary, started/updated timestamps, and live node roster with stable selection and status glyphs;
-- selected-agent metadata plus bounded, auto-following lifecycle transcript/output tails;
+- an explicit campaign status, deterministic English progress summary, and started/updated timestamps;
+- a phase-labeled execution tree derived from persisted IR edges, with structural nodes, parallel branches, and dynamic instances;
+- selected-agent metadata including the phase, label, full prompt, state, agent, model/thinking, recovery policy, capabilities, timestamps, current tool/path, usage, async identity, errors, and bounded transcript/output tails;
 - pause/resume (`p`), stop the selected agent (`x`), stop the whole campaign (`X`), retry (`r`), and skip or gate override (`s`);
 - a persistent per-run Pi SDK session for orchestrator chat, stored under the campaign run directory;
 - read-only `campaign_status` and explicit `campaign_control` tools for the orchestrator; it cannot edit files or run shell commands;
 - `Tab` switches between campaign navigation and chat, with independent transcript scrolling and IME-compatible input;
 - deterministic local chat commands `/pause`, `/resume`, `/stop-agent`, `/retry`, and `/stop`.
 
-Outside TUI mode, inspection returns formatted JSON status.
+Outside TUI mode, inspection returns formatted JSON status. The generator is explicitly prompted to produce labeled hierarchical phases, fan out independent work with parallel/map/branch nodes, and converge into synthesis or review instead of defaulting to a flat chain.
 
 ## Automatic routing
 

@@ -4,8 +4,9 @@ import { CampaignCompileError, compileCampaign } from "../../src/compiler/index.
 import { Ajv } from "ajv";
 import { CAMPAIGN_IR_V1_SCHEMA } from "../../src/schemas/campaign-ir-v1.ts";
 import { validCampaign } from "../fixtures/valid.ts";
-import { extractCampaignCandidate, generatorPrompt } from "../../src/generator/index.ts";
-test("generator prompt delegates the goal and demonstrates the exact DSL shape", () => { const prompt = generatorPrompt("Analyze the repository", { maxAgents: 10, maxConcurrency: 2, maxRounds: 2, maxTokens: 1000, timeoutMs: 1000 }); assert.match(prompt, /DO NOT perform the user's goal/); assert.match(prompt, /Do not inspect the repository and do not call tools/); assert.match(prompt, /export default defineCampaign/); assert.match(prompt, /top-level fields are meta, limits, and program/); assert.match(prompt, /limits\.maxAgents must cover/); assert.match(prompt, /output only the campaign program/); });
+import { defaultCampaignSource, extractCampaignCandidate, generatorPrompt } from "../../src/generator/index.ts";
+test("generator prompt delegates the goal and demonstrates the exact DSL shape", () => { const prompt = generatorPrompt("Analyze the repository", { maxAgents: 10, maxConcurrency: 2, maxRounds: 2, maxTokens: 1000, timeoutMs: 1000 }); assert.match(prompt, /DO NOT perform the user's goal/); assert.match(prompt, /Do not inspect the repository and do not call tools/); assert.match(prompt, /export default defineCampaign/); assert.match(prompt, /tree or DAG-shaped campaign/); assert.match(prompt, /phase-analysis/); assert.match(prompt, /template\("Analyze concern A/); assert.match(prompt, /top-level fields are meta, limits, and program/); assert.match(prompt, /limits\.maxAgents must cover/); assert.match(prompt, /output only the campaign program/); });
+test("default campaign source uses explicit template interpolation", () => { assert.doesNotThrow(() => compileCampaign(defaultCampaignSource("Implement the goal"))); });
 test("invalid generator code fences remain available to the repair pass", () => { assert.match(extractCampaignCandidate("analysis\n```ts\ndefineCampaign({ workflow: [] });\n```"), /workflow/); assert.match(extractCampaignCandidate("```ts\nold();\n```\n```ts\nnewest();\n```"), /newest/); });
 test("compiles deterministically without executing source", () => { delete process.env.CAMPAIGN_PWNED; const one = compileCampaign(validCampaign); const two = compileCampaign(validCampaign); assert.deepEqual(one.ir, two.ir); assert.equal(one.irHash, two.irHash); assert.equal(one.ir.root, "sequence-1"); assert.equal(one.ir.nodes.length, 7); const validate = new Ajv({ strict: false }).compile(CAMPAIGN_IR_V1_SCHEMA); assert.equal(validate(one.ir), true, JSON.stringify(validate.errors)); assert.equal(process.env.CAMPAIGN_PWNED, undefined); });
 test("rejects arbitrary imports and calls with ranges", () => { const source = `import fs from "node:fs"; import { defineCampaign } from "pi-campaign/dsl"; fs.writeFileSync("x", "x"); export default defineCampaign({});`; assert.throws(() => compileCampaign(source), (error: unknown) => { assert.ok(error instanceof CampaignCompileError); assert.ok(error.diagnostics.some((item) => item.code === "unsafe-import")); assert.ok(error.diagnostics.every((item) => !item.range || item.range.line >= 1)); return true; }); });
@@ -41,10 +42,11 @@ test("rejects malformed gates, predicates, schemas, and hidden acceptance comman
   }
 });
 
-test("rejects malformed ref/template expressions and helper arity", () => {
+test("rejects malformed ref/template expressions and unresolved plain interpolation", () => {
   const base = (prompt: string) => `import {defineCampaign,task,ref,template} from "pi-campaign/dsl"; export default defineCampaign({meta:{name:"x",version:1},limits:{maxAgents:1,maxConcurrency:1,maxRounds:1,maxTokens:10},program:task({id:"work",agent:"scout",prompt:${prompt}})});`;
   assert.throws(() => compileCampaign(base("ref(123)")), (error: unknown) => (error as CampaignCompileError).diagnostics.some((item) => item.code === "invalid-expression"));
   assert.throws(() => compileCampaign(base('template("x", "ignored")')), (error: unknown) => (error as CampaignCompileError).diagnostics.some((item) => item.code === "invalid-arity"));
+  assert.throws(() => compileCampaign(base('"Use {{prior.output}}"')), (error: unknown) => (error as CampaignCompileError).diagnostics.some((item) => item.code === "unresolved-interpolation"));
 });
 
 test("rejects references between parallel siblings", () => {
