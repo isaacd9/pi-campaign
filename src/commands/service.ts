@@ -81,8 +81,7 @@ export class CampaignService {
       try {
         const { store } = await EventStore.open(runDir(ctx.sessionManager.getSessionId() ?? "ephemeral", listed.runId));
         const state = store.state; // snapshot list entries are hints; replayed log state decides restoration
-        const hasInterruptedWork = Object.values(state.nodes).some((node) => node.status === "interrupted" || node.status === "scheduled" || node.status === "running");
-        if (!["running", "paused"].includes(state.status) && !(state.status === "failed" && hasInterruptedWork)) continue;
+        if (!shouldRestoreState(state)) continue;
         if (!state.ir) {
           await store.append("node.interrupted", { nodeId: "campaign-generator", error: "Generator was interrupted before compilation; safe read-only generation will restart." });
           void this.generateAndLaunch(state.goal, ctx, store).catch(async (error) => { if (!this.disposed) await store.append("run.failed", { error: error instanceof Error ? error.message : String(error) }); });
@@ -206,4 +205,11 @@ export class CampaignService {
   private notify(ctx: ExtensionContext, message: string, level: "info" | "warning" | "error"): void { if (ctx.hasUI) ctx.ui.notify(message, level); else console.error(message); }
 }
 function clampOverrideThinking(model: AvailableModel, requested: ThinkingLevel): ThinkingLevel { if (!model.reasoning) return "off"; const levels: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"]; const map = model.thinkingLevelMap; const start = levels.indexOf(requested); for (let distance = 0; distance < levels.length; distance++) for (const index of [start - distance, start + distance]) { const level = levels[index]; if (!level || map?.[level] === null || ((level === "xhigh" || level === "max") && map?.[level] === undefined)) continue; return level; } return "off"; }
+export function shouldRestoreState(state: CampaignState): boolean {
+  const hasInterruptedWork = Object.values(state.nodes).some((node) => node.status === "interrupted" || node.status === "scheduled" || node.status === "running");
+  // Generation is read-only and can be started explicitly again. A failed
+  // pre-IR generator must not become a permanent reload-triggered respawner.
+  if (!state.ir && state.status === "failed") return false;
+  return ["running", "paused"].includes(state.status) || (state.status === "failed" && hasInterruptedWork);
+}
 function requiresLaunchApproval(ir: CampaignIR): boolean { const agentTasks = ir.nodes.filter((node) => node.kind === "agent-task"); const writers = agentTasks.filter((node) => node.capabilities.includes("code-write") || ["worker", "implementer"].includes(node.agent)); const riskyGate = ir.nodes.some((node) => node.kind === "gate" && ["command", "safety"].includes(node.check.type)); return ir.limits.maxAgents > 25 || ir.limits.maxTokens > 1_500_000 || writers.length > 1 || riskyGate; }
