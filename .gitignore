@@ -1,0 +1,15 @@
+# pi-subagents run artifacts (inputs, outputs, transcripts, metadata)
+.pi-subagents/
+
+# Node
+node_modules/
+dist/
+build/
+*.log
+
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
