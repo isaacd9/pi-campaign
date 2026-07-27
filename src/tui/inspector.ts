@@ -67,7 +67,7 @@ export class CampaignInspector implements Component, Focusable {
     // Leave room for Pi/tmux chrome. Filling the physical terminal exactly
     // makes the final row wrap and forces a visible full-screen repaint.
     const workspaceRows = Math.max(12, rows - 6);
-    const usable = Math.max(4, workspaceRows - 10);
+    const usable = Math.max(4, workspaceRows - 12);
     this.bodyHeight = Math.max(2, Math.floor(usable * 0.52));
     this.chatHeight = Math.max(2, usable - this.bodyHeight);
     const rosterWidth = Math.max(24, Math.min(48, Math.floor((innerWidth - 1) * 0.38)));
@@ -87,7 +87,9 @@ export class CampaignInspector implements Component, Focusable {
     const visibleChat = chat.slice(this.chatScroll, this.chatScroll + this.chatHeight);
     const elapsed = formatDuration(((this.state.status === "running" || this.state.status === "paused") ? Date.now() : this.state.updatedAt) - this.state.createdAt);
     const lines = [theme.fg("border", `╭${"─".repeat(innerWidth)}╮`)];
-    lines.push(theme.fg("border", "│") + fit(` ${theme.bold("Campaign")} ${this.options.runId} · ${statusText(theme, this.state.status)} · ${elapsed} · ${this.state.tokens} tok · $${this.state.cost.toFixed(4)}`, innerWidth) + theme.fg("border", "│"));
+    lines.push(theme.fg("border", "│") + fit(` ${theme.bold("Campaign")} ${this.options.runId} · ${theme.bold("STATUS")} ${statusText(theme, this.state.status)} · ${elapsed} · ${this.state.tokens} tok · $${this.state.cost.toFixed(4)}`, innerWidth) + theme.fg("border", "│"));
+    lines.push(theme.fg("border", "│") + fit(` ${theme.bold("Summary:")} ${campaignEnglishSummary(this.state)}`, innerWidth) + theme.fg("border", "│"));
+    lines.push(theme.fg("border", "│") + fit(` ${theme.bold("Timestamp:")} updated ${formatTimestamp(this.state.updatedAt)} · started ${formatTimestamp(this.state.createdAt)}`, innerWidth) + theme.fg("border", "│"));
     lines.push(theme.fg("border", `├${"─".repeat(rosterWidth)}┬${"─".repeat(detailWidth)}┤`));
     for (let index = 0; index < this.bodyHeight; index++) lines.push(theme.fg("border", "│") + fit(roster[index] ?? "", rosterWidth) + theme.fg("border", "│") + fit(visibleDetail[index] ?? "", detailWidth) + theme.fg("border", "│"));
     lines.push(theme.fg("border", `├${"─".repeat(innerWidth)}┤`));
@@ -262,3 +264,22 @@ function baseId(value: string): string { return value.replace(/\[(?:round-)?\d+\
 function fit(text: string, width: number): string { const clipped = truncateToWidth(text, Math.max(0, width)); return clipped + " ".repeat(Math.max(0, width - visibleWidth(clipped))); }
 function rightAligned(left: string, right: string, width: number): string { const rightWidth = visibleWidth(right); const leftWidth = Math.max(0, width - rightWidth - 1); return fit(left, leftWidth) + " ".repeat(Math.max(1, width - leftWidth - rightWidth)) + fit(right, rightWidth); }
 function formatDuration(ms: number): string { const seconds = Math.max(0, Math.floor(ms / 1000)); return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m${seconds % 60}s`; }
+function formatTimestamp(value: number): string { return new Date(value).toLocaleString(); }
+export function campaignEnglishSummary(state: CampaignState): string {
+  const nodes = Object.values(state.nodes);
+  const completed = nodes.filter((node) => node.status === "completed" || node.status === "skipped").length;
+  const active = nodes.filter((node) => node.status === "running" || node.status === "scheduled").length;
+  const failed = nodes.filter((node) => node.status === "failed" || node.status === "interrupted").length;
+  if (!state.ir) {
+    if (state.status === "failed") return `Workflow generation failed${state.error ? `: ${state.error}` : "."}`;
+    if (state.status === "stopped") return `Workflow generation was stopped. Goal: ${state.goal}`;
+    return `Generating a workflow for: ${state.goal}`;
+  }
+  const name = state.ir.meta.name;
+  const progress = `${completed} finished, ${active} active${failed ? `, ${failed} failed or interrupted` : ""}`;
+  if (state.status === "completed") return `${name} completed successfully (${progress}). Goal: ${state.goal}`;
+  if (state.status === "failed") return `${name} failed (${progress})${state.error ? `: ${state.error}` : "."}`;
+  if (state.status === "paused") return `${name} is paused (${progress}). ${state.pauseReason ? `Reason: ${state.pauseReason}. ` : ""}Goal: ${state.goal}`;
+  if (state.status === "stopped") return `${name} was stopped (${progress}). Goal: ${state.goal}`;
+  return `${name} is running (${progress}). Goal: ${state.goal}`;
+}

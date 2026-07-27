@@ -15,6 +15,7 @@ export class EventStore {
   private stateValue: CampaignState;
   private seq = 0;
   private queue: Promise<unknown> = Promise.resolve();
+  private listeners = new Set<(state: CampaignState, event: CampaignEvent) => void>();
 
   private constructor(public readonly runDir: string, state: CampaignState) {
     this.eventsPath = join(runDir, "events.jsonl");
@@ -56,6 +57,11 @@ export class EventStore {
 
   get state(): CampaignState { return structuredClone(this.stateValue); }
 
+  subscribe(listener: (state: CampaignState, event: CampaignEvent) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
   append(type: string, data: unknown = {}, timestamp = Date.now()): Promise<CampaignEvent> {
     const execute = async (): Promise<CampaignEvent> => {
       const nextSeq = this.seq + 1;
@@ -74,6 +80,10 @@ export class EventStore {
       this.seq = nextSeq;
       this.stateValue = reduceEvent(this.stateValue, event);
       await writeAtomic(this.statePath, this.stateValue);
+      const snapshot = this.state;
+      for (const listener of this.listeners) {
+        try { listener(snapshot, event); } catch { /* A UI observer cannot fail persisted execution. */ }
+      }
       return event;
     };
     const result = this.queue.then(execute, execute);

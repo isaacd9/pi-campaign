@@ -32,11 +32,12 @@ export function reduceEvent(state: CampaignState, event: CampaignEvent): Campaig
   switch (event.type) {
     case "run.created":
       if (data.ir) next.ir = data.ir as NonNullable<CampaignState["ir"]>;
+      if (typeof data.summary === "string") next.summary = data.summary;
       if (data.input !== undefined) next.input = data.input;
       break;
-    case "run.started": next.status = "running"; delete next.error; break;
-    case "run.paused": next.status = "paused"; break;
-    case "run.resumed": next.status = "running"; break;
+    case "run.started": next.status = "running"; delete next.error; delete next.pauseReason; break;
+    case "run.paused": next.status = "paused"; next.pauseReason = typeof data.reason === "string" ? data.reason : "paused"; break;
+    case "run.resumed": next.status = "running"; delete next.pauseReason; break;
     case "run.completed": next.status = "completed"; break;
     case "run.failed": next.status = "failed"; next.error = String(data.error ?? "Campaign failed"); break;
     case "run.stopped": next.status = "stopped"; break;

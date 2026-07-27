@@ -5,7 +5,7 @@ import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@e
 import { compileCampaign } from "../compiler/index.ts";
 import { DEFAULT_HARD_CAPS, type CampaignIR, type HardCaps, type ThinkingLevel } from "../dsl/types.ts";
 import { GateExecutor } from "../gates/index.ts";
-import { extractCampaignSource, generatorPrompt, repairPrompt } from "../generator/index.ts";
+import { extractCampaignCandidate, extractCampaignSource, generatorPrompt, repairPrompt } from "../generator/index.ts";
 import { ModelRouter, type AvailableModel } from "../model-router/index.ts";
 import { EventStore } from "../persistence/event-store.ts";
 import { RunLease } from "../persistence/lease.ts";
@@ -22,21 +22,27 @@ export const DEFAULT_CONFIG: CampaignConfig = { launchPolicy: "smart", ultracode
 interface ActiveRun { supervisor: CampaignSupervisor; kernel: CampaignKernel; lease: RunLease; promise?: Promise<CampaignState>; dormant: boolean }
 interface BootstrapRun { kernel: CampaignKernel; store: EventStore; currentRun?: KernelRun; currentNodeId?: string }
 export class CampaignService {
-  private active = new Map<string, ActiveRun>(); private bootstrapRuns = new Map<string, BootstrapRun>(); private bootstrapKernels = new Set<CampaignKernel>(); private bootstrapLeases = new Set<RunLease>(); private orchestrators = new Map<string, CampaignOrchestratorSession>(); private uiDisposers = new Set<() => void>(); private context?: ExtensionContext; private disposed = false;
+  private active = new Map<string, ActiveRun>(); private bootstrapRuns = new Map<string, BootstrapRun>(); private bootstrapKernels = new Set<CampaignKernel>(); private bootstrapLeases = new Set<RunLease>(); private orchestrators = new Map<string, CampaignOrchestratorSession>(); private uiDisposers = new Set<() => void>(); private statusStates = new Map<string, CampaignState>(); private statusUnsubscribers = new Map<string, () => void>(); private context?: ExtensionContext; private disposed = false;
   constructor(private pi: ExtensionAPI, public config: CampaignConfig = DEFAULT_CONFIG) {}
   setContext(ctx: ExtensionContext): void { this.context = ctx; }
   registerUiDisposer(disposer: () => void): () => void { this.uiDisposers.add(disposer); return () => this.uiDisposers.delete(disposer); }
   async startGoal(goal: string, ctx: ExtensionContext): Promise<string> {
     const runId = createId("campaign"); const sessionId = ctx.sessionManager.getSessionId() ?? "ephemeral"; const dir = runDir(sessionId, runId); await mkdir(dir, { recursive: true, mode: 0o700 });
-    const store = await EventStore.create(dir, runId, goal, ctx.cwd); await store.append("run.started", { bootstrap: true }); this.pi.appendEntry("campaign-run", { runId, status: "generating", runDir: dir });
-    void this.generateAndLaunch(goal, ctx, store).catch(async (error) => { if (this.disposed || store.state.status === "stopped") return; await store.append("run.failed", { error: error instanceof Error ? error.message : String(error) }); this.notify(ctx, `Campaign ${runId} failed: ${error instanceof Error ? error.message : String(error)}`, "error"); });
-    this.notify(ctx, `Campaign ${runId} generation started in the background.`, "info"); return runId;
+    const store = await EventStore.create(dir, runId, goal, ctx.cwd); this.watchStore(store, ctx); await store.append("run.started", { bootstrap: true }); this.pi.appendEntry("campaign-run", { runId, status: "generating", runDir: dir });
+    void this.generateAndLaunch(goal, ctx, store).catch(async (error) => { if (this.disposed || store.state.status === "stopped") return; await store.append("run.failed", { error: error instanceof Error ? error.message : String(error) }); });
+    return runId;
   }
   async runSource(source: string, goal: string, ctx: ExtensionContext, existing?: EventStore, input?: unknown): Promise<string> {
     const authenticatedModels = await this.availableModels(ctx);
-    const compiled = compileCampaign(source, { hardCaps: this.config.hardCaps, availableModels: authenticatedModels.map((model) => `${model.provider}/${model.id}`) }); const sessionId = ctx.sessionManager.getSessionId() ?? "ephemeral"; const runId = existing?.state.runId ?? createId("campaign"); const dir = existing?.runDir ?? runDir(sessionId, runId); await mkdir(join(dir, "subagents"), { recursive: true, mode: 0o700 }); await writeFile(join(dir, "source.campaign.ts"), source, { mode: 0o600 }); await writeFile(join(dir, "campaign.ir.json"), `${JSON.stringify(compiled.ir, null, 2)}\n`, { mode: 0o600 }); if (compiled.ir.inputSchema) { const validate = new Ajv({ allErrors: true, strict: false }).compile(compiled.ir.inputSchema); if (!validate(input)) throw new Error(`Campaign input failed schema: ${new Ajv().errorsText(validate.errors)}`); } const store = existing ?? await EventStore.create(dir, runId, goal, ctx.cwd); await store.append("run.created", { ir: compiled.ir, summary: compiled.summary, irHash: compiled.irHash, ...(input !== undefined ? { input } : {}) }); this.pi.appendEntry("campaign-run", { runId, status: "compiled", sourceHash: compiled.ir.sourceHash, irHash: compiled.irHash });
+    const compiled = compileCampaign(source, { hardCaps: this.config.hardCaps, availableModels: authenticatedModels.map((model) => `${model.provider}/${model.id}`) }); const sessionId = ctx.sessionManager.getSessionId() ?? "ephemeral"; const runId = existing?.state.runId ?? createId("campaign"); const dir = existing?.runDir ?? runDir(sessionId, runId); await mkdir(join(dir, "subagents"), { recursive: true, mode: 0o700 }); await writeFile(join(dir, "source.campaign.ts"), source, { mode: 0o600 }); await writeFile(join(dir, "campaign.ir.json"), `${JSON.stringify(compiled.ir, null, 2)}\n`, { mode: 0o600 }); if (compiled.ir.inputSchema) { const validate = new Ajv({ allErrors: true, strict: false }).compile(compiled.ir.inputSchema); if (!validate(input)) throw new Error(`Campaign input failed schema: ${new Ajv().errorsText(validate.errors)}`); } const store = existing ?? await EventStore.create(dir, runId, goal, ctx.cwd); this.watchStore(store, ctx); await store.append("run.created", { ir: compiled.ir, summary: compiled.summary, irHash: compiled.irHash, ...(input !== undefined ? { input } : {}) }); this.pi.appendEntry("campaign-run", { runId, status: "compiled", sourceHash: compiled.ir.sourceHash, irHash: compiled.irHash });
     const approval = this.config.launchPolicy === "always" || (this.config.launchPolicy === "smart" && requiresLaunchApproval(compiled.ir));
-    if (approval) { const approved = ctx.hasUI && await ctx.ui.confirm("Launch Campaign?", `${compiled.summary}\n\nSource: ${join(dir, "source.campaign.ts")}\nIR: ${join(dir, "campaign.ir.json")}`); if (!approved) { await store.append("run.stopped", { reason: ctx.hasUI ? "launch declined" : "launch approval requires interactive UI" }); this.notify(ctx, `Campaign ${runId} compiled but was not launched. Inspect ${dir}.`, "warning"); return runId; } }
+    if (approval) {
+      // Background generation must never interrupt the parent editor with a
+      // late modal. The inspector is the explicit control plane: `p` resumes
+      // this durably paused run and therefore approves launch.
+      await store.append("run.paused", { reason: "launch approval required; open /campaign-inspect and press p to launch" });
+      return runId;
+    }
     await this.launch(compiled.ir, store, ctx, input); return runId;
   }
   async runSaved(name: string, input: unknown, ctx: ExtensionCommandContext): Promise<string> { const { source } = await loadSavedCampaign(ctx.cwd, ctx.isProjectTrusted(), name); return this.runSource(source, `saved:${name}`, ctx, undefined, input); }
@@ -66,7 +72,15 @@ export class CampaignService {
     const run = this.active.get(runId);
     if (run) { await run.supervisor.stop(); return; }
     const bootstrap = this.bootstrapRuns.get(runId);
-    if (!bootstrap) throw new Error(`Campaign '${runId}' is not active.`);
+    if (!bootstrap) {
+      const ctx = this.context;
+      if (!ctx) throw new Error(`Campaign '${runId}' is not active.`);
+      const { store } = await EventStore.open(runDir(ctx.sessionManager.getSessionId() ?? "ephemeral", safeName(runId)));
+      this.watchStore(store, ctx);
+      if (store.state.status !== "paused") throw new Error(`Campaign '${runId}' is not active.`);
+      await store.append("run.stopped", { reason: "user" });
+      return;
+    }
     if (bootstrap.currentRun) await bootstrap.kernel.stop(bootstrap.currentRun).catch(() => undefined);
     if (bootstrap.currentNodeId && ["scheduled", "running"].includes(bootstrap.store.state.nodes[bootstrap.currentNodeId]?.status ?? "")) await bootstrap.store.append("node.interrupted", { nodeId: bootstrap.currentNodeId, error: "Generator stopped from Campaign inspector." });
     await bootstrap.store.append("run.stopped", { reason: "user" });
@@ -79,7 +93,7 @@ export class CampaignService {
     await run.supervisor.skip(nodeId, "agent stopped from Campaign inspector");
   }
   async pause(runId: string): Promise<void> { const run = this.requireActive(runId); await run.supervisor.pause(); }
-  async resume(runId: string): Promise<void> { const run = this.requireActive(runId); await run.supervisor.resume(); if (run.dormant) { run.dormant = false; run.promise = run.supervisor.run().finally(() => this.cleanup(runId)); } }
+  async resume(runId: string): Promise<void> { let run = this.active.get(runId); if (!run) run = await this.activatePersisted(runId); await run.supervisor.resume(); if (run.dormant) { run.dormant = false; run.promise = run.supervisor.run().finally(() => this.cleanup(runId)); } }
   async retry(runId: string, nodeId: string): Promise<void> { let run = this.active.get(runId); if (!run) run = await this.activatePersisted(runId); await run.supervisor.retry(nodeId); if (run.dormant) { run.dormant = false; run.promise = run.supervisor.run().finally(() => this.cleanup(runId)); } }
   async skip(runId: string, nodeId: string): Promise<void> { let run = this.active.get(runId); if (!run) run = await this.activatePersisted(runId); await run.supervisor.skip(nodeId); if (run.dormant) { run.dormant = false; run.promise = run.supervisor.run().finally(() => this.cleanup(runId)); } }
   async editPrompt(runId: string, nodeId: string, prompt: string): Promise<void> { let run = this.active.get(runId); if (!run) run = await this.activatePersisted(runId); await run.supervisor.editPendingPrompt(nodeId, prompt); }
@@ -90,6 +104,7 @@ export class CampaignService {
       if (this.active.has(listed.runId)) continue;
       try {
         const { store } = await EventStore.open(runDir(ctx.sessionManager.getSessionId() ?? "ephemeral", listed.runId));
+        this.watchStore(store, ctx);
         const state = store.state; // snapshot list entries are hints; replayed log state decides restoration
         if (!shouldRestoreState(state)) continue;
         if (!state.ir) {
@@ -113,6 +128,9 @@ export class CampaignService {
     this.disposed = true;
     for (const orchestrator of this.orchestrators.values()) { if (orchestrator.isStreaming) await orchestrator.abort().catch(() => undefined); orchestrator.dispose(); }
     this.orchestrators.clear();
+    for (const unsubscribe of this.statusUnsubscribers.values()) unsubscribe();
+    this.statusUnsubscribers.clear();
+    this.statusStates.clear();
     for (const dispose of [...this.uiDisposers]) dispose();
     this.uiDisposers.clear();
     for (const [runId, bootstrap] of this.bootstrapRuns) {
@@ -150,14 +168,14 @@ export class CampaignService {
         if (status.state !== "complete") { const error = status.error ?? `Generator kernel ${status.state}`; await store.append("node.failed", { nodeId, error }); throw new Error(error); }
         const output = status.output;
         await store.append("node.completed", { nodeId, output });
-        source = extractCampaignSource(output);
-        try { compileCampaign(source, { hardCaps: this.config.hardCaps }); break; }
-        catch (error) { if (attempt === 2) throw error; prompt = repairPrompt(source, error); }
+        const candidate = extractCampaignCandidate(output);
+        try { source = extractCampaignSource(output); compileCampaign(source, { hardCaps: this.config.hardCaps }); break; }
+        catch (error) { if (attempt === 2) throw error; prompt = repairPrompt(candidate, error); }
       }
     } finally { this.bootstrapRuns.delete(store.state.runId); this.bootstrapKernels.delete(kernel); kernel.dispose(); this.bootstrapLeases.delete(bootstrapLease); await bootstrapLease.release(); this.updateStatus(ctx); }
     if (this.disposed) return; await this.runSource(source, goal, ctx, store);
   }
-  private async launch(ir: CampaignIR, store: EventStore, ctx: ExtensionContext, input?: unknown): Promise<void> { if (this.disposed) throw new Error("Campaign service disposed"); const kernel = new SubagentsRpcV1Kernel(this.pi.events); await kernel.ping(); const lease = await RunLease.acquire(store.runDir, createId("owner")); const supervisor = this.makeSupervisor(ir, store, kernel, ctx, input); const promise = supervisor.run().then((state) => { if (!this.disposed) { this.notify(ctx, `Campaign ${state.runId} ${state.status}.`, state.status === "completed" ? "info" : "error"); this.pi.appendEntry("campaign-run", { runId: state.runId, status: state.status, updatedAt: state.updatedAt }); } return state; }).finally(() => this.cleanup(store.state.runId)); this.active.set(store.state.runId, { supervisor, kernel, lease, promise, dormant: false }); this.updateStatus(ctx); }
+  private async launch(ir: CampaignIR, store: EventStore, ctx: ExtensionContext, input?: unknown): Promise<void> { if (this.disposed) throw new Error("Campaign service disposed"); const kernel = new SubagentsRpcV1Kernel(this.pi.events); await kernel.ping(); const lease = await RunLease.acquire(store.runDir, createId("owner")); const supervisor = this.makeSupervisor(ir, store, kernel, ctx, input); const promise = supervisor.run().then((state) => { if (!this.disposed) this.pi.appendEntry("campaign-run", { runId: state.runId, status: state.status, updatedAt: state.updatedAt }); return state; }).finally(() => this.cleanup(store.state.runId)); this.active.set(store.state.runId, { supervisor, kernel, lease, promise, dormant: false }); this.updateStatus(ctx); }
   private makeSupervisor(ir: CampaignIR, store: EventStore, kernel: CampaignKernel, ctx: ExtensionContext, input?: unknown): CampaignSupervisor {
     const routerPromise = this.availableModels(ctx).then((models) => new ModelRouter(models));
     const gates = new GateExecutor(ctx.cwd, {
@@ -194,7 +212,9 @@ export class CampaignService {
         await store.append("model.routed", { nodeId: instanceId, decision });
         return decision;
       },
-      emit: (message, final) => { this.pi.sendMessage({ customType: "campaign-milestone", content: message, display: true, details: { runId: store.state.runId, final } }, { deliverAs: "nextTurn" }); },
+      // Milestones stay in the durable campaign log and inspector. They never
+      // inject messages into the parent Pi conversation.
+      emit: () => undefined,
     });
   }
   private async wait(run: KernelRun, kernel: CampaignKernel): Promise<KernelStatus> {
@@ -210,10 +230,30 @@ export class CampaignService {
     await store.append("usage.recorded", { kernelRunId, tokens: status.tokens ?? 0, cost: status.cost ?? 0, state: status.state });
   }
   private async availableModels(ctx: ExtensionContext): Promise<AvailableModel[]> { const models = await ctx.modelRegistry.getAvailable(); return models.map((model) => ({ provider: model.provider, id: model.id, name: model.name, reasoning: model.reasoning, ...(model.thinkingLevelMap ? { thinkingLevelMap: model.thinkingLevelMap as NonNullable<AvailableModel["thinkingLevelMap"]> } : {}), input: [...model.input], contextWindow: model.contextWindow, maxTokens: model.maxTokens, cost: model.cost })); }
-  private async activatePersisted(id: string): Promise<ActiveRun> { const ctx = this.context; if (!ctx) throw new Error("No active Campaign context."); const { store } = await EventStore.open(runDir(ctx.sessionManager.getSessionId() ?? "ephemeral", id)); if (!store.state.ir) throw new Error(`Campaign '${id}' has no compiled IR.`); const kernel = new SubagentsRpcV1Kernel(this.pi.events); await kernel.ping(); const lease = await RunLease.acquire(store.runDir, createId("retry")); const supervisor = this.makeSupervisor(store.state.ir, store, kernel, ctx, store.state.input); const run: ActiveRun = { supervisor, kernel, lease, dormant: true }; this.active.set(id, run); this.updateStatus(ctx); return run; }
+  private async activatePersisted(id: string): Promise<ActiveRun> { const ctx = this.context; if (!ctx) throw new Error("No active Campaign context."); const { store } = await EventStore.open(runDir(ctx.sessionManager.getSessionId() ?? "ephemeral", id)); this.watchStore(store, ctx); if (!store.state.ir) throw new Error(`Campaign '${id}' has no compiled IR.`); const kernel = new SubagentsRpcV1Kernel(this.pi.events); await kernel.ping(); const lease = await RunLease.acquire(store.runDir, createId("retry")); const supervisor = this.makeSupervisor(store.state.ir, store, kernel, ctx, store.state.input); const run: ActiveRun = { supervisor, kernel, lease, dormant: true }; this.active.set(id, run); this.updateStatus(ctx); return run; }
   private requireActive(id: string): ActiveRun { const run = this.active.get(id); if (!run) throw new Error(`Campaign '${id}' is not active.`); return run; }
   private cleanup(id: string): void { const run = this.active.get(id); if (!run) return; run.kernel.dispose(); void run.lease.release(); this.active.delete(id); if (this.context) this.updateStatus(this.context); }
-  private updateStatus(ctx: ExtensionContext): void { const count = this.active.size + this.bootstrapRuns.size; ctx.ui.setStatus("campaign", count ? ctx.ui.theme.fg("accent", `campaign ${count} active`) : undefined); }
+  private watchStore(store: EventStore, ctx: ExtensionContext): void {
+    const runId = store.state.runId;
+    this.statusUnsubscribers.get(runId)?.();
+    const update = (state: CampaignState) => { this.statusStates.set(runId, state); this.updateStatus(ctx); };
+    update(store.state);
+    this.statusUnsubscribers.set(runId, store.subscribe((state) => update(state)));
+  }
+  private updateStatus(ctx: ExtensionContext): void {
+    const states = [...this.statusStates.values()];
+    const latest = states.sort((a, b) => b.updatedAt - a.updatedAt)[0];
+    if (!latest) { ctx.ui.setStatus("campaign", undefined); return; }
+    const activeCount = states.filter((state) => state.status === "running" || state.status === "paused").length;
+    const status = !latest.ir && latest.status === "running" ? "generating" : latest.status;
+    const nodes = Object.values(latest.nodes);
+    const done = nodes.filter((node) => ["completed", "skipped"].includes(node.status)).length;
+    const progress = nodes.length ? ` · ${done}/${nodes.length}` : "";
+    const multiple = activeCount > 1 ? ` · ${activeCount} active` : "";
+    const timestamp = new Date(latest.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    const color = status === "failed" ? "error" : status === "paused" || status === "stopped" ? "warning" : status === "completed" ? "success" : "accent";
+    ctx.ui.setStatus("campaign", ctx.ui.theme.fg(color, `campaign ${status}${progress}${multiple} · ${timestamp}`));
+  }
   private notify(ctx: ExtensionContext, message: string, level: "info" | "warning" | "error"): void { if (ctx.hasUI) ctx.ui.notify(message, level); else console.error(message); }
 }
 function clampOverrideThinking(model: AvailableModel, requested: ThinkingLevel): ThinkingLevel { if (!model.reasoning) return "off"; const levels: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"]; const map = model.thinkingLevelMap; const start = levels.indexOf(requested); for (let distance = 0; distance < levels.length; distance++) for (const index of [start - distance, start + distance]) { const level = levels[index]; if (!level || map?.[level] === null || ((level === "xhigh" || level === "max") && map?.[level] === undefined)) continue; return level; } return "off"; }

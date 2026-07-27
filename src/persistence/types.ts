@@ -42,6 +42,8 @@ export interface CampaignState {
   cwd: string;
   status: RunStatus;
   ir?: CampaignIR;
+  /** Deterministic compiler summary shown by the inspector. */
+  summary?: string;
   input?: unknown;
   createdAt: number;
   updatedAt: number;
@@ -51,6 +53,7 @@ export interface CampaignState {
   checkpoints: string[];
   emitted: string[];
   error?: string;
+  pauseReason?: string;
   tokens: number;
   cost: number;
   agentsStarted: number;

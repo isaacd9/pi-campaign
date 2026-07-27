@@ -4,7 +4,7 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 import { ModelRouter } from "../../src/model-router/index.ts";
 import { ControlInput } from "../../src/tui/input.ts";
 import { columns, fit } from "../../src/tui/layout.ts";
-import { CampaignInspector } from "../../src/tui/inspector.ts";
+import { CampaignInspector, campaignEnglishSummary } from "../../src/tui/inspector.ts";
 import { initialState } from "../../src/supervisor/reducer.ts";
 test("deterministic router picks smallest sufficient model and clamps thinking", async () => { const models = [{ provider: "p", id: "tiny-mini", reasoning: false, input: ["text"], contextWindow: 100_000, cost: { input: 1, output: 1 } }, { provider: "p", id: "solid-sonnet", reasoning: true, input: ["text", "image"], contextWindow: 200_000, cost: { input: 3, output: 10 } }]; const router = new ModelRouter(models); const scout = await router.route({ taskClass: "scout", prompt: "inspect", risk: "low" }); assert.equal(scout.model, "p/tiny-mini"); assert.equal(scout.thinking, "off"); const implementation = await router.route({ taskClass: "implementation", prompt: "code", risk: "medium" }); assert.equal(implementation.model, "p/solid-sonnet"); assert.equal(implementation.thinking, "medium"); assert.deepEqual(implementation, await router.route({ taskClass: "implementation", prompt: "code", risk: "medium" })); });
 test("invalid LLM routing output falls back deterministically", async () => { const router = new ModelRouter([{ provider: "p", id: "mini", reasoning: false, input: ["text"], contextWindow: 10 }], async () => ({ model: "evil/missing", thinking: "ultra" })); const decision = await router.route({ taskClass: "router", prompt: "x" }); assert.equal(decision.source, "deterministic"); });
@@ -27,9 +27,19 @@ test("campaign workspace renders a width-safe fleet and orchestrator chat", () =
   });
   for (const width of [44, 72, 120]) {
     const lines = component.render(width);
+    assert.ok(lines.some((line) => line.includes("STATUS running")));
+    assert.ok(lines.some((line) => line.includes("Summary:")));
+    assert.ok(lines.some((line) => line.includes("Timestamp:")));
     assert.ok(lines.some((line) => line.includes("Orchestrator")));
     assert.ok(lines.length <= 30, "workspace must leave terminal rows for Pi/tmux chrome");
     assert.ok(lines.every((line) => visibleWidth(line) <= width));
   }
   component.dispose();
+});
+
+test("campaign summary describes status in English", () => {
+  const state = initialState("run", "Explain the architecture", "/tmp");
+  state.status = "failed";
+  state.error = "compiler rejected the source";
+  assert.match(campaignEnglishSummary(state), /Workflow generation failed: compiler rejected the source/);
 });
