@@ -12,7 +12,7 @@ export class CampaignInspector implements Component, Focusable {
     const theme = this.options.theme; const elapsed = formatDuration((this.state.status === "running" || this.state.status === "paused" ? Date.now() : this.state.updatedAt) - this.state.createdAt); const header = fit(`${theme.bold(this.state.goal)} | ${status(theme, this.state.status)} | ${elapsed} | ${this.state.tokens} tok | $${this.state.cost.toFixed(4)} | pane ${this.pane + 1}/2`, width);
     const nodes = this.filteredNodes(); if (this.selected >= nodes.length) this.selected = Math.max(0, nodes.length - 1); const left = nodes.length ? nodes.map((node, index) => `${index === this.selected ? "▶" : " "} ${icon(node.status)} ${node.id}  ${node.status}`) : ["  No nodes match filter"];
     const selected = nodes[this.selected]; const irNode = selected ? this.state.ir?.nodes.find((node) => node.id === baseId(selected.id)) : undefined; const right = selected ? [`Node: ${selected.id}`, `kind: ${irNode?.kind ?? "runtime"}`, `state: ${selected.status} · attempts ${selected.attempts}`, ...(irNode?.kind === "agent-task" ? [`agent: ${irNode.agent}`, `model: ${selected.modelOverride?.model ?? selected.routing?.model ?? irNode.model ?? "automatic"}`, `thinking: ${selected.modelOverride?.thinking ?? selected.routing?.thinking ?? irNode.thinking ?? "automatic"}`, ...(selected.routing ? [`route: ${selected.routing.source} · confidence ${selected.routing.confidence.toFixed(2)}`, `fallbacks: ${selected.routing.fallbackModels.join(", ") || "none"}`] : [])] : []), ...(selected.kernelRunId ? [`kernel: ${selected.kernelRunId}`] : []), ...(selected.kernel?.currentTool ? [`tool: ${selected.kernel.currentTool}${selected.kernel.currentPath ? ` · ${selected.kernel.currentPath}` : ""}`] : []), ...(selected.kernel?.recentOutput?.length ? ["Recent output:", ...selected.kernel.recentOutput.slice(-5)] : []), ...(selected.error ? [theme.fg("error", `error: ${selected.error}`)] : []), ...(selected.output !== undefined ? ["", "Output:", ...JSON.stringify(selected.output, null, 2).split("\n").slice(0, 12)] : [])] : ["Select a node for details."];
-    const body = columns(left, right, width); const timeline = ["", theme.fg("accent", "Timeline / campaign control"), ...this.timeline.slice(-4).map((line) => fit(line, width)), ...this.input.render(width), theme.fg("dim", "↑↓/jk navigate · p pause/resume · x stop · r retry · s skip/override · e edit · m model · / command · q close")];
+    const body = columns(left, right, width); const timeline = ["", theme.fg("accent", "Timeline / campaign control"), ...this.timeline.slice(-4).map((line) => fit(line, width)), ...this.input.render(width), theme.fg("dim", "↑↓/jk navigate · x stop selected agent · X stop campaign · p pause/resume · r retry · s skip/override · q close")];
     return [header, "─".repeat(Math.max(1, width)), ...body, ...timeline].map((line) => fit(line, width));
   }
   handleInput(data: string): void {
@@ -23,7 +23,8 @@ export class CampaignInspector implements Component, Focusable {
     else if (matchesKey(data, "tab")) this.pane = (this.pane + 1) % 2;
     else if (data === "f") this.filter = this.filter === "all" ? "active" : this.filter === "active" ? "failed" : "all";
     else if (data === "p") void this.action(this.state.status === "paused" ? this.options.service.resume(this.options.runId) : this.options.service.pause(this.options.runId), this.state.status === "paused" ? "resume requested" : "pause requested");
-    else if (data === "x") void this.action(this.options.service.stop(this.options.runId), "stop requested");
+    else if (data === "x" && selected) void this.confirmStopNode(selected.id);
+    else if (data === "X") void this.confirmStopCampaign();
     else if (data === "r" && selected) void this.action(this.options.service.retry(this.options.runId, selected.id), `retry ${selected.id}`);
     else if (data === "s" && selected) void this.confirmSkipOrOverride(selected.id);
     else if (data === "e" && selected) this.input.setText(`/edit ${selected.id} `);
@@ -35,6 +36,16 @@ export class CampaignInspector implements Component, Focusable {
   dispose(): void { if (this.disposed) return; this.disposed = true; clearInterval(this.timer); this.unregister?.(); this.unregister = undefined; }
   private filteredNodes() { const values = Object.values(this.state.nodes); if (this.filter === "active") return values.filter((node) => ["scheduled", "running", "paused", "interrupted"].includes(node.status)); if (this.filter === "failed") return values.filter((node) => node.status === "failed" || node.status === "interrupted"); return values; }
   private async refresh(): Promise<void> { try { this.state = await this.options.service.getState(this.options.runId); this.options.tui.requestRender(); } catch { /* run can disappear during shutdown */ } }
+  private async confirmStopNode(nodeId: string): Promise<void> {
+    const node = this.state.nodes[nodeId];
+    if (!node || !["scheduled", "running", "paused", "interrupted"].includes(node.status)) { this.timeline.push(`! ${nodeId} is not active`); this.options.tui.requestRender(); return; }
+    if (!await this.options.confirm("Stop selected campaign agent?", `${nodeId}${node.kernelRunId ? `\n\nAsync run: ${node.kernelRunId}` : ""}`)) { this.timeline.push("· agent stop cancelled"); this.options.tui.requestRender(); return; }
+    await this.action(this.options.service.stopNode(this.options.runId, nodeId), `stopped ${nodeId}`);
+  }
+  private async confirmStopCampaign(): Promise<void> {
+    if (!await this.options.confirm("Stop entire campaign?", this.options.runId)) { this.timeline.push("· campaign stop cancelled"); this.options.tui.requestRender(); return; }
+    await this.action(this.options.service.stop(this.options.runId), "campaign stop requested");
+  }
   private async confirmSkipOrOverride(nodeId: string, suppliedReason?: string): Promise<void> {
     const gate = this.state.ir?.nodes.find((node) => node.id === baseId(nodeId));
     const evidence = gate?.kind === "gate" ? this.state.gates.filter((record) => record.gateId === gate.id).at(-1)?.evidence : this.state.nodes[nodeId]?.output;
@@ -55,12 +66,13 @@ export class CampaignInspector implements Component, Focusable {
         case "/pause": await this.options.service.pause(this.options.runId); break;
         case "/resume": await this.options.service.resume(this.options.runId); break;
         case "/stop": await this.options.service.stop(this.options.runId); break;
+        case "/stop-agent": await this.options.service.stopNode(this.options.runId, args[0]!); break;
         case "/retry": await this.options.service.retry(this.options.runId, args[0]!); break;
         case "/skip": await this.confirmSkipOrOverride(args[0]!); return;
         case "/override": await this.confirmSkipOrOverride(args[0]!, args.slice(1).join(" ")); return;
         case "/edit": await this.options.service.editPrompt(this.options.runId, args[0]!, args.slice(1).join(" ")); break;
         case "/model": await this.options.service.overrideModel(this.options.runId, args[0]!, args[1]!, args[2] as never); break;
-        default: throw new Error("Campaign controller model chat is not enabled in RPC v1; use /pause, /resume, /retry, /skip, /override, /edit, /model, or /stop.");
+        default: throw new Error("Campaign controller model chat is not enabled in RPC v1; use /pause, /resume, /stop-agent, /retry, /skip, /override, /edit, /model, or /stop.");
       }
       this.timeline.push(`✓ ${value}`);
     } catch (error) { this.timeline.push(`! ${error instanceof Error ? error.message : String(error)}`); }

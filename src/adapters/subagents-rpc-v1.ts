@@ -40,7 +40,18 @@ export class SubagentsRpcV1Kernel implements CampaignKernel {
     return status;
   }
   async interrupt(run: KernelRun): Promise<void> { await this.call("interrupt", { id: run.id, ...(run.asyncDir ? { dir: run.asyncDir } : {}) }); }
-  async stop(run: KernelRun): Promise<void> { await this.call("stop", { id: run.id, ...(run.asyncDir ? { dir: run.asyncDir } : {}) }); }
+  async stop(run: KernelRun): Promise<void> {
+    while (true) {
+      try { await this.call("stop", { id: run.id, ...(run.asyncDir ? { dir: run.asyncDir } : {}) }); return; }
+      catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const spawnedAt = this.spawnedAt.get(run.id);
+        if (/Status file not found/i.test(message) && spawnedAt !== undefined && Date.now() - spawnedAt < this.startupGraceMs) { await delay(50); continue; }
+        if (/invalid_state:.*\b(?:complete|failed|stopped)\b/i.test(message)) return;
+        throw error;
+      }
+    }
+  }
   dispose(): void { this.disposed = true; for (const cancel of this.pending) cancel(); this.pending.clear(); this.spawnedAt.clear(); }
   private call(method: Method, params: unknown): Promise<unknown> {
     if (this.disposed) return Promise.reject(new Error("pi-subagents RPC adapter disposed")); const requestId = `campaign-${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -53,5 +64,6 @@ export class SubagentsRpcV1Kernel implements CampaignKernel {
     });
   }
 }
+function delay(ms: number): Promise<void> { return new Promise((resolve) => setTimeout(resolve, ms)); }
 function statusFromRpc(data: unknown): KernelStatus { const text = (data as { text?: string }).text ?? ""; const state = /\bcomplete\b/i.test(text) ? "complete" : /\bfailed\b/i.test(text) ? "failed" : /\bpaused\b/i.test(text) ? "paused" : /\bstopped\b/i.test(text) ? "stopped" : "running"; return { state, raw: data, ...(state === "failed" ? { error: text } : {}) }; }
 export const RPC_V1_UNSUPPORTED_CONTROLS = ["resume-child", "steer", "append-step"] as const;

@@ -8,11 +8,20 @@ class Bus {
   handlers = new Map<string, Set<(data: unknown) => void>>();
   asyncDir = "/missing";
   statusCalls = 0;
+  stopCalls = 0;
+  stopMissingReplies = 0;
   on(event: string, handler: (data: unknown) => void) { const set = this.handlers.get(event) ?? new Set<(data: unknown) => void>(); set.add(handler); this.handlers.set(event, set); return () => set.delete(handler); }
   emit(event: string, data: unknown) {
     if (event === "subagents:rpc:v1:request") {
       const request = data as { requestId: string; method: string; params: Record<string, unknown> };
       if (request.method === "status") this.statusCalls++;
+      if (request.method === "stop") {
+        this.stopCalls++;
+        if (this.stopCalls <= this.stopMissingReplies) {
+          queueMicrotask(() => this.emit(`subagents:rpc:v1:reply:${request.requestId}`, { version: 1, requestId: request.requestId, success: false, error: { code: "not_found", message: "Status file not found." } }));
+          return;
+        }
+      }
       const replyData = request.method === "ping"
         ? { version: 1, methods: ["ping", "spawn"] }
         : request.method === "spawn"
@@ -37,4 +46,14 @@ test("RPC v1 adapter treats a newly spawned run without status.json as queued", 
     assert.equal(bus.statusCalls, 0, "must not query RPC during the status publication race");
     kernel.dispose();
   } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("RPC v1 adapter retries stop through the status publication race", async () => {
+  const bus = new Bus();
+  bus.stopMissingReplies = 1;
+  const kernel = new SubagentsRpcV1Kernel(bus, 1_000, 1_000);
+  const run = await kernel.spawn({ agent: "scout", task: "read", cwd: "/tmp" });
+  await kernel.stop(run);
+  assert.equal(bus.stopCalls, 2);
+  kernel.dispose();
 });

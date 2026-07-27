@@ -115,10 +115,10 @@ The inspector uses Pi's non-overlay `ctx.ui.custom()` API and never stops the ba
 
 - node status/filter navigation (`↑↓`, `j/k`, `f`);
 - prompt/output/model/kernel details;
-- pause/resume (`p`), stop (`x`), retry (`r`), skip or gate override (`s`);
+- pause/resume (`p`), stop the selected agent (`x`), stop the whole campaign (`X`), retry (`r`), skip or gate override (`s`);
 - pending prompt edit (`e`) and model override (`m`);
 - a width-safe timeline and IME-compatible input using `Focusable`/`CURSOR_MARKER`;
-- deterministic local commands `/pause`, `/resume`, `/retry`, `/skip`, `/override`, `/edit`, `/model`, and `/stop`.
+- deterministic local commands `/pause`, `/resume`, `/stop-agent`, `/retry`, `/skip`, `/override`, `/edit`, `/model`, and `/stop`.
 
 Outside TUI mode, inspection returns formatted JSON status.
 
