@@ -25,7 +25,7 @@ Run `/campaign-doctor` after installation. It checks:
 ## Commands
 
 - `/campaign <goal>` — route a generator model, ask a read-only `context-builder` for restricted source, compile/repair it (maximum two repairs), execute it in the background, and enter its dedicated Campaign workspace.
-- `/campaign-inspect [run-id]` — open or re-enter the full-screen Campaign workspace with live nodes, transcript tails, controls, and orchestrator chat.
+- `/campaign-inspect [run-id]` — open or re-enter the full-screen Campaign workspace with live nodes, transcript tails, controls, and orchestrator chat. It uses Pi's stable overlay compositor for tmux-safe live updates.
 - `/campaign-list` — active and recent runs for this Pi session.
 - `/campaign-run <name> [json-input]` — validate typed JSON input and run a saved campaign (project definition overrides personal).
 - `/campaign-save <run-id> [name] [--project]` — save immutable run source.
@@ -111,7 +111,7 @@ Saved definitions live in `~/.pi/agent/campaigns/*.campaign.ts` and trusted-proj
 
 ## Inspector
 
-Launching a campaign enters a dedicated, non-overlay Campaign workspace built from the proven `pi-subagents` fleet layout patterns. Closing it never stops the background supervisor; `/campaign-inspect` re-enters it. The campaign—not the parent Pi chat—is the first-class object:
+Launching a campaign enters a dedicated Campaign workspace built from the proven `pi-subagents` fleet layout and overlay-compositor patterns. Closing it never stops the background supervisor; `/campaign-inspect` re-enters it. The campaign—not the parent Pi chat—is the first-class object:
 
 - a live campaign-node roster with stable selection and status glyphs;
 - selected-agent metadata plus bounded, auto-following lifecycle transcript/output tails;

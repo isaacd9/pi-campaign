@@ -45,7 +45,13 @@ async function openCampaignWorkspace(service: CampaignService, runId: string, ct
     confirm: (title, message) => ctx.ui.confirm(title, message),
     inputReason: (title, placeholder) => ctx.ui.input(title, placeholder),
     done: () => done(undefined),
-  }));
+  }), {
+    // Use Pi's overlay compositor—the same stable rendering path as
+    // /subagents-fleet. Non-overlay custom views make tmux repaint the whole
+    // terminal whenever live campaign output changes.
+    overlay: true,
+    overlayOptions: { anchor: "center", width: "98%", minWidth: 44, maxHeight: "95%", margin: 1 },
+  });
 }
 async function loadConfig(): Promise<CampaignConfig> { try { const parsed = JSON.parse(await readFile(join(agentDir(), "campaign-config.json"), "utf8")) as Partial<CampaignConfig>; return validateConfig({ ...DEFAULT_CONFIG, ...parsed, hardCaps: { ...DEFAULT_CONFIG.hardCaps, ...parsed.hardCaps } }); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return structuredClone(DEFAULT_CONFIG); throw error; } }
 async function saveConfig(config: CampaignConfig): Promise<void> { await import("node:fs/promises").then(({ mkdir }) => mkdir(agentDir(), { recursive: true, mode: 0o700 })); await writeFile(join(agentDir(), "campaign-config.json"), `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 }); }
