@@ -16,12 +16,13 @@ import type { CampaignKernel, KernelRun, KernelStatus } from "../adapters/kernel
 import { SubagentsRpcV1Kernel } from "../adapters/subagents-rpc-v1.ts";
 import { CampaignSupervisor } from "../supervisor/supervisor.ts";
 import { withCwdWriterLock } from "../supervisor/writer-lock.ts";
+import { CampaignOrchestratorSession } from "../orchestrator/session.ts";
 export interface CampaignConfig { launchPolicy: "always" | "smart" | "never"; ultracode: boolean; hardCaps: HardCaps; pollMs: number }
 export const DEFAULT_CONFIG: CampaignConfig = { launchPolicy: "smart", ultracode: true, hardCaps: DEFAULT_HARD_CAPS, pollMs: 500 };
 interface ActiveRun { supervisor: CampaignSupervisor; kernel: CampaignKernel; lease: RunLease; promise?: Promise<CampaignState>; dormant: boolean }
 interface BootstrapRun { kernel: CampaignKernel; store: EventStore; currentRun?: KernelRun; currentNodeId?: string }
 export class CampaignService {
-  private active = new Map<string, ActiveRun>(); private bootstrapRuns = new Map<string, BootstrapRun>(); private bootstrapKernels = new Set<CampaignKernel>(); private bootstrapLeases = new Set<RunLease>(); private uiDisposers = new Set<() => void>(); private context?: ExtensionContext; private disposed = false;
+  private active = new Map<string, ActiveRun>(); private bootstrapRuns = new Map<string, BootstrapRun>(); private bootstrapKernels = new Set<CampaignKernel>(); private bootstrapLeases = new Set<RunLease>(); private orchestrators = new Map<string, CampaignOrchestratorSession>(); private uiDisposers = new Set<() => void>(); private context?: ExtensionContext; private disposed = false;
   constructor(private pi: ExtensionAPI, public config: CampaignConfig = DEFAULT_CONFIG) {}
   setContext(ctx: ExtensionContext): void { this.context = ctx; }
   registerUiDisposer(disposer: () => void): () => void { this.uiDisposers.add(disposer); return () => this.uiDisposers.delete(disposer); }
@@ -52,6 +53,15 @@ export class CampaignService {
     } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
   }
   async getState(runId: string, ctx = this.context): Promise<CampaignState> { if (!ctx) throw new Error("No active Campaign context."); const active = this.active.get(runId); if (active) return active.supervisor.state; const { store } = await EventStore.open(runDir(ctx.sessionManager.getSessionId() ?? "ephemeral", safeName(runId))); return store.state; }
+  async getOrchestrator(runId: string, ctx: ExtensionContext): Promise<CampaignOrchestratorSession> {
+    const existing = this.orchestrators.get(runId);
+    if (existing) return existing;
+    const state = await this.getState(runId, ctx);
+    const directory = runDir(ctx.sessionManager.getSessionId() ?? "ephemeral", safeName(runId));
+    const orchestrator = await CampaignOrchestratorSession.create(runId, directory, state.cwd, ctx, this);
+    this.orchestrators.set(runId, orchestrator);
+    return orchestrator;
+  }
   async stop(runId: string): Promise<void> {
     const run = this.active.get(runId);
     if (run) { await run.supervisor.stop(); return; }
@@ -101,6 +111,8 @@ export class CampaignService {
   async doctor(ctx: ExtensionContext): Promise<string> { const lines = ["Campaign doctor", `storage: ${runRoot(ctx.sessionManager.getSessionId() ?? "ephemeral")}`]; try { await import("typebox/compile"); lines.push("typebox/compile: ok"); } catch (error) { lines.push(`typebox/compile: MISSING (${error instanceof Error ? error.message : String(error)})`, "remediation: install typebox at the Pi package root, then /reload"); } try { const adapter = new SubagentsRpcV1Kernel(this.pi.events, 1500); const ping = await adapter.ping(); adapter.dispose(); lines.push(`pi-subagents RPC: v${ping.version} (${ping.methods.join(", ")})`); } catch (error) { lines.push(`pi-subagents RPC: unavailable (${error instanceof Error ? error.message : String(error)})`); } try { const models = await ctx.modelRegistry.getAvailable(); lines.push(`authenticated models: ${models.length}`); } catch (error) { lines.push(`authenticated models: error (${String(error)})`); } try { const probe = join(runRoot(ctx.sessionManager.getSessionId() ?? "ephemeral"), `.doctor-${process.pid}`); await mkdir(probe, { recursive: true }); await writeFile(join(probe, "probe"), "ok"); await import("node:fs/promises").then(({ rm }) => rm(probe, { recursive: true, force: true })); lines.push("storage probe: ok"); } catch (error) { lines.push(`storage probe: failed (${String(error)})`); } lines.push("RPC v1 limitation: native child resume, steer, and append-step are unavailable; Campaign uses persisted restart/retry semantics."); return lines.join("\n"); }
   async dispose(): Promise<void> {
     this.disposed = true;
+    for (const orchestrator of this.orchestrators.values()) { if (orchestrator.isStreaming) await orchestrator.abort().catch(() => undefined); orchestrator.dispose(); }
+    this.orchestrators.clear();
     for (const dispose of [...this.uiDisposers]) dispose();
     this.uiDisposers.clear();
     for (const [runId, bootstrap] of this.bootstrapRuns) {

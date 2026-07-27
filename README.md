@@ -24,8 +24,8 @@ Run `/campaign-doctor` after installation. It checks:
 
 ## Commands
 
-- `/campaign <goal>` — route a generator model, ask a read-only `context-builder` for restricted source, compile/repair it (maximum two repairs), and execute it in the background.
-- `/campaign-inspect [run-id]` — full-width, non-overlay inspector with live node details and controls.
+- `/campaign <goal>` — route a generator model, ask a read-only `context-builder` for restricted source, compile/repair it (maximum two repairs), execute it in the background, and enter its dedicated Campaign workspace.
+- `/campaign-inspect [run-id]` — open or re-enter the full-screen Campaign workspace with live nodes, transcript tails, controls, and orchestrator chat.
 - `/campaign-list` — active and recent runs for this Pi session.
 - `/campaign-run <name> [json-input]` — validate typed JSON input and run a saved campaign (project definition overrides personal).
 - `/campaign-save <run-id> [name] [--project]` — save immutable run source.
@@ -111,14 +111,15 @@ Saved definitions live in `~/.pi/agent/campaigns/*.campaign.ts` and trusted-proj
 
 ## Inspector
 
-The inspector uses Pi's non-overlay `ctx.ui.custom()` API and never stops the background supervisor when closed. It provides:
+Launching a campaign enters a dedicated, non-overlay Campaign workspace built from the proven `pi-subagents` fleet layout patterns. Closing it never stops the background supervisor; `/campaign-inspect` re-enters it. The campaign—not the parent Pi chat—is the first-class object:
 
-- node status/filter navigation (`↑↓`, `j/k`, `f`);
-- prompt/output/model/kernel details;
-- pause/resume (`p`), stop the selected agent (`x`), stop the whole campaign (`X`), retry (`r`), skip or gate override (`s`);
-- pending prompt edit (`e`) and model override (`m`);
-- a width-safe timeline and IME-compatible input using `Focusable`/`CURSOR_MARKER`;
-- deterministic local commands `/pause`, `/resume`, `/stop-agent`, `/retry`, `/skip`, `/override`, `/edit`, `/model`, and `/stop`.
+- a live campaign-node roster with stable selection and status glyphs;
+- selected-agent metadata plus bounded, auto-following lifecycle transcript/output tails;
+- pause/resume (`p`), stop the selected agent (`x`), stop the whole campaign (`X`), retry (`r`), and skip or gate override (`s`);
+- a persistent per-run Pi SDK session for orchestrator chat, stored under the campaign run directory;
+- read-only `campaign_status` and explicit `campaign_control` tools for the orchestrator; it cannot edit files or run shell commands;
+- `Tab` switches between campaign navigation and chat, with independent transcript scrolling and IME-compatible input;
+- deterministic local chat commands `/pause`, `/resume`, `/stop-agent`, `/retry`, and `/stop`.
 
 Outside TUI mode, inspection returns formatted JSON status.
 
@@ -139,7 +140,7 @@ Only `ctx.modelRegistry.getAvailable()` models (authenticated models) enter the 
 - RPC v1 solo spawn does not carry native phase/label/thinking/output-schema fields. Campaign preserves these in its own IR/event state, passes supported model/acceptance fields, and validates outputs itself.
 - RPC v1 has no native child resume, steer, or append-step. Mid-child steering/controller-model chat is not represented as working when it is not. The inspector exposes campaign-level pause/retry/relaunch controls and deterministic local control commands.
 - Worktree creation is delegated to `pi-subagents`; v1 solo spawn cannot request its private single-run worktree controls. The compiler rejects unsafe parallel writers. At runtime, a declared isolated writer fan-out fails unless the user explicitly approves a serialized active-worktree downgrade. Mutation-capable assignments and repair agents also take a cross-process canonical-cwd writer lock. Kernel-native grouped isolation remains reserved for a future public adapter.
-- The inspector's free-form controller input is limited to validated local commands in 0.1. A controller-model response/action schema is reserved for the additive RPC/control release.
+- Orchestrator chat is a dedicated Pi SDK session with campaign status/control tools. It can reason about and control campaign-level state, but RPC v1 still cannot steer a running child turn or append native executor steps.
 - The `smart` launch policy confirms campaigns with command/safety gates, multiple writers, more than 25 declared agents, or more than 1.5M declared tokens. It is a compact confirmation rather than a dedicated graph preview; source and IR paths are shown for inspection.
 
 ## Development
