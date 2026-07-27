@@ -17,6 +17,8 @@ test("artifact adapter requires v2, reads costUsd, and contains outputFile", asy
     const status = await readSubagentStatus(root, finalPath);
     assert.equal(status.output, "final child result");
     assert.equal(status.cost, 0.25);
+    await writeFile(join(root, "status.json"), JSON.stringify({ lifecycleArtifactVersion: 2, state: "complete", outputFile: join(root, "out.txt") }));
+    assert.equal((await readSubagentStatus(root)).output, "full transcript with prompt examples", "absolute output path must survive /var to /private/var canonicalization");
     await writeFile(join(root, "status.json"), JSON.stringify({ state: "complete" }));
     await assert.rejects(readSubagentStatus(root), /expected 2/);
     await writeFile(join(root, "status.json"), JSON.stringify({ lifecycleArtifactVersion: 2, state: "complete", outputFile: "../outside.txt" }));

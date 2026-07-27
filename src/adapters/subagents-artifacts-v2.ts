@@ -15,7 +15,8 @@ interface ArtifactStatus {
 }
 
 export async function readSubagentStatus(asyncDir: string, trustedOutputPath?: string): Promise<KernelStatus> {
-  const root = await realpath(asyncDir);
+  const lexicalRoot = resolve(asyncDir);
+  const root = await realpath(lexicalRoot);
   const raw = JSON.parse(await readFile(join(root, "status.json"), "utf8")) as ArtifactStatus;
   if (raw.lifecycleArtifactVersion !== 2) throw new Error(`Unsupported or missing pi-subagents lifecycleArtifactVersion ${String(raw.lifecycleArtifactVersion)}; expected 2.`);
   const state = normalizeState(raw.state);
@@ -26,7 +27,7 @@ export async function readSubagentStatus(asyncDir: string, trustedOutputPath?: s
   // as the child's result (especially during compiler repair).
   if (output === undefined && trustedOutputPath && state === "complete") output = await readTrustedOutput(trustedOutputPath);
   if (output === undefined && raw.outputFile) {
-    const path = await containedArtifactPath(root, raw.outputFile);
+    const path = await containedArtifactPath(lexicalRoot, root, raw.outputFile);
     try { output = await readFile(path, "utf8"); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   }
@@ -48,13 +49,17 @@ async function readTrustedOutput(path: string): Promise<string> {
   return readFile(path, "utf8");
 }
 
-async function containedArtifactPath(root: string, value: string): Promise<string> {
-  const candidate = isAbsolute(value) ? resolve(value) : resolve(root, value);
-  const lexical = relative(root, candidate);
+async function containedArtifactPath(lexicalRoot: string, canonicalRoot: string, value: string): Promise<string> {
+  // Compare the status path against the spelling supplied by pi-subagents
+  // before comparing real paths. On macOS /var canonically resolves to
+  // /private/var; mixing those two forms causes a valid child output to look
+  // lexically outside its own async directory.
+  const candidate = isAbsolute(value) ? resolve(value) : resolve(lexicalRoot, value);
+  const lexical = relative(lexicalRoot, candidate);
   if (lexical.startsWith("..") || isAbsolute(lexical)) throw new Error(`pi-subagents outputFile escapes async artifact directory: ${value}`);
   try {
     const actual = await realpath(candidate);
-    const rel = relative(root, actual);
+    const rel = relative(canonicalRoot, actual);
     if (rel.startsWith("..") || isAbsolute(rel)) throw new Error(`pi-subagents outputFile resolves outside async artifact directory: ${value}`);
     return actual;
   } catch (error) {
