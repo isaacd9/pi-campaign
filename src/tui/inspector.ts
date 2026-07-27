@@ -6,7 +6,8 @@ import type { CampaignOrchestratorSession, OrchestratorLine } from "../orchestra
 import { readSubagentStatus } from "../adapters/subagents-artifacts-v2.ts";
 import { ControlInput } from "./input.ts";
 
-const REFRESH_MS = 750;
+const REFRESH_MS = 1_000;
+const RENDER_THROTTLE_MS = 120;
 const TRANSCRIPT_LINES = 300;
 type Theme = ExtensionContext["ui"]["theme"];
 interface InspectorOptions {
@@ -35,6 +36,8 @@ export class CampaignInspector implements Component, Focusable {
   private panel: "campaign" | "chat" = "chat";
   private notices: string[] = [];
   private timer: NodeJS.Timeout;
+  private renderTimer: NodeJS.Timeout | undefined;
+  private lastRenderAt = 0;
   private unregister: (() => void) | undefined;
   private unsubscribeOrchestrator: (() => void) | undefined;
   private disposed = false;
@@ -50,7 +53,7 @@ export class CampaignInspector implements Component, Focusable {
     this.input = new ControlInput((value) => void this.submit(value));
     this.input.focused = true;
     this.unregister = options.service.registerUiDisposer(() => this.dispose());
-    this.unsubscribeOrchestrator = options.orchestrator.subscribe(() => { this.chatAutoFollow = true; options.tui.requestRender(); });
+    this.unsubscribeOrchestrator = options.orchestrator.subscribe(() => { this.chatAutoFollow = true; this.scheduleRender(); });
     void this.refresh();
     this.timer = setInterval(() => void this.refresh(), REFRESH_MS);
     this.timer.unref();
@@ -61,9 +64,12 @@ export class CampaignInspector implements Component, Focusable {
     const theme = this.options.theme;
     const innerWidth = width - 2;
     const rows = this.options.tui.terminal?.rows ?? 32;
-    const usable = Math.max(12, rows - 10);
-    this.bodyHeight = Math.max(5, Math.floor(usable * 0.52));
-    this.chatHeight = Math.max(4, usable - this.bodyHeight);
+    // Leave room for Pi/tmux chrome. Filling the physical terminal exactly
+    // makes the final row wrap and forces a visible full-screen repaint.
+    const workspaceRows = Math.max(12, rows - 6);
+    const usable = Math.max(4, workspaceRows - 10);
+    this.bodyHeight = Math.max(2, Math.floor(usable * 0.52));
+    this.chatHeight = Math.max(2, usable - this.bodyHeight);
     const rosterWidth = Math.max(24, Math.min(48, Math.floor((innerWidth - 1) * 0.38)));
     const detailWidth = Math.max(1, innerWidth - rosterWidth - 1);
     const nodes = this.nodes();
@@ -125,10 +131,10 @@ export class CampaignInspector implements Component, Focusable {
   }
 
   invalidate(): void {}
-  dispose(): void { if (this.disposed) return; this.disposed = true; clearInterval(this.timer); this.unregister?.(); this.unsubscribeOrchestrator?.(); this.unregister = undefined; this.unsubscribeOrchestrator = undefined; }
+  dispose(): void { if (this.disposed) return; this.disposed = true; clearInterval(this.timer); if (this.renderTimer) clearTimeout(this.renderTimer); this.renderTimer = undefined; this.unregister?.(); this.unsubscribeOrchestrator?.(); this.unregister = undefined; this.unsubscribeOrchestrator = undefined; }
 
   private nodes(): NodeState[] { return Object.values(this.state.nodes); }
-  private moveSelection(delta: number, count: number): void { if (!count) return; this.selected = Math.max(0, Math.min(count - 1, this.selected + delta)); this.selectedKey = this.nodes()[this.selected]?.id; this.detailAutoFollow = true; void this.refreshDetail(); }
+  private moveSelection(delta: number, count: number): void { if (!count) return; this.selected = Math.max(0, Math.min(count - 1, this.selected + delta)); this.selectedKey = this.nodes()[this.selected]?.id; this.detailAutoFollow = true; void this.refreshDetail().then((changed) => { if (changed) this.scheduleRender(); }); }
 
   private rosterLines(nodes: NodeState[], width: number): string[] {
     if (!nodes.length) return [this.options.theme.fg("dim", " No campaign nodes yet")];
@@ -175,20 +181,23 @@ export class CampaignInspector implements Component, Focusable {
     this.refreshing = true;
     try {
       const previous = this.nodes()[this.selected]?.id ?? this.selectedKey;
+      const priorUpdatedAt = this.state.updatedAt;
+      const priorStatus = this.state.status;
       this.state = await this.options.service.getState(this.options.runId);
       const nodes = this.nodes();
       const preserved = previous ? nodes.findIndex((node) => node.id === previous) : -1;
       this.selected = preserved >= 0 ? preserved : Math.min(this.selected, Math.max(0, nodes.length - 1));
       this.selectedKey = nodes[this.selected]?.id;
-      await this.refreshDetail();
-      this.options.tui.requestRender();
-    } catch (error) { this.notices.push(`refresh failed: ${error instanceof Error ? error.message : String(error)}`); }
+      const detailChanged = await this.refreshDetail();
+      if (detailChanged || priorUpdatedAt !== this.state.updatedAt || priorStatus !== this.state.status) this.scheduleRender();
+    } catch (error) { this.notices.push(`refresh failed: ${error instanceof Error ? error.message : String(error)}`); this.scheduleRender(); }
     finally { this.refreshing = false; }
   }
 
-  private async refreshDetail(): Promise<void> {
+  private async refreshDetail(): Promise<boolean> {
+    const previous = this.detailLines.join("\n");
     const node = this.nodes()[this.selected];
-    if (!node?.asyncDir) { this.detailLines = []; return; }
+    if (!node?.asyncDir) { this.detailLines = []; return previous !== ""; }
     try {
       const status = await readSubagentStatus(node.asyncDir);
       const text = typeof status.output === "string" ? status.output : status.output === undefined ? "" : JSON.stringify(status.output, null, 2);
@@ -196,6 +205,19 @@ export class CampaignInspector implements Component, Focusable {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") this.detailLines = [`status unavailable: ${error instanceof Error ? error.message : String(error)}`];
     }
+    return previous !== this.detailLines.join("\n");
+  }
+
+  private scheduleRender(): void {
+    if (this.disposed || this.renderTimer) return;
+    const wait = Math.max(0, RENDER_THROTTLE_MS - (Date.now() - this.lastRenderAt));
+    this.renderTimer = setTimeout(() => {
+      this.renderTimer = undefined;
+      if (this.disposed) return;
+      this.lastRenderAt = Date.now();
+      this.options.tui.requestRender();
+    }, wait);
+    this.renderTimer.unref();
   }
 
   private async confirmStopNode(node: NodeState): Promise<void> {

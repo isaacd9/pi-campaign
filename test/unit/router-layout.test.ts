@@ -28,7 +28,7 @@ test("campaign workspace renders a width-safe fleet and orchestrator chat", () =
   for (const width of [44, 72, 120]) {
     const lines = component.render(width);
     assert.ok(lines.some((line) => line.includes("Orchestrator")));
-    assert.ok(lines.length <= 36);
+    assert.ok(lines.length <= 30, "workspace must leave terminal rows for Pi/tmux chrome");
     assert.ok(lines.every((line) => visibleWidth(line) <= width));
   }
   component.dispose();
