@@ -1,0 +1,5 @@
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+export function fit(line: string, width: number): string { return truncateToWidth(line, Math.max(1, width), "…"); }
+export function columns(left: string[], right: string[], width: number, leftRatio = 0.42): string[] { if (width < 72) return [...left, "", ...right].map((line) => fit(line, width)); const leftWidth = Math.max(24, Math.floor(width * leftRatio)); const rightWidth = width - leftWidth - 3; const count = Math.max(left.length, right.length); return Array.from({ length: count }, (_, i) => { const a = fit(left[i] ?? "", leftWidth); const padding = " ".repeat(Math.max(0, leftWidth - visibleWidth(a))); return fit(`${a}${padding} │ ${fit(right[i] ?? "", rightWidth)}`, width); }); }
+export function border(title: string, width: number): string { const safe = fit(` ${title} `, Math.max(1, width - 2)); return fit(`┌${safe}${"─".repeat(Math.max(0, width - visibleWidth(safe) - 2))}┐`, width); }
+export function assertWidth(lines: string[], width: number): boolean { return lines.every((line) => visibleWidth(line) <= width); }

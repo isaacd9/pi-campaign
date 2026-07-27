@@ -1,0 +1,4 @@
+export interface KernelAssignment { agent: string; task: string; cwd: string; phase?: string; label?: string; model?: string; thinking?: string; worktree?: boolean; outputSchema?: Record<string, unknown>; acceptance?: Record<string, unknown>; timeoutMs?: number; outputPath?: string }
+export interface KernelRun { id: string; asyncDir?: string; outputPath?: string }
+export interface KernelStatus { state: "queued" | "running" | "complete" | "failed" | "paused" | "stopped"; output?: unknown; error?: string; tokens?: number; cost?: number; raw?: unknown }
+export interface CampaignKernel { readonly worktreeIsolation?: boolean; ping(): Promise<{ version: number; methods: string[] }>; spawn(assignment: KernelAssignment): Promise<KernelRun>; status(run: KernelRun): Promise<KernelStatus>; interrupt(run: KernelRun): Promise<void>; stop(run: KernelRun): Promise<void>; dispose(): void }

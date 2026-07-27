@@ -1,0 +1,72 @@
+{
+  "name": "pi-campaign",
+  "version": "0.1.0",
+  "description": "Deterministic, resumable campaign execution for Pi",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "campaign",
+    "agents"
+  ],
+  "exports": {
+    ".": "./src/index.ts",
+    "./dsl": "./src/dsl/index.ts",
+    "./compiler": "./src/compiler/index.ts"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/campaign/index.ts"
+    ]
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test test/unit/*.test.ts test/integration/*.test.ts",
+    "test:unit": "tsx --test test/unit/*.test.ts",
+    "test:integration": "tsx --test test/integration/*.test.ts"
+  },
+  "dependencies": {
+    "ajv": "^8.17.1",
+    "typescript": "^5.7.3"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-agent-core": "0.81.1",
+    "@earendil-works/pi-ai": "0.81.1",
+    "@earendil-works/pi-coding-agent": "0.81.1",
+    "@earendil-works/pi-tui": "0.81.1",
+    "@types/node": "^22.10.5",
+    "tsx": "^4.19.2",
+    "typebox": "1.1.38"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-agent-core": {
+      "optional": true
+    },
+    "@earendil-works/pi-ai": {
+      "optional": true
+    },
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "@earendil-works/pi-tui": {
+      "optional": true
+    },
+    "typebox": {
+      "optional": true
+    }
+  },
+  "files": [
+    "extensions",
+    "src",
+    "README.md",
+    "PLAN.md"
+  ]
+}

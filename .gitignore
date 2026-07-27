@@ -1,10 +1,14 @@
 # pi-subagents run artifacts (inputs, outputs, transcripts, metadata)
 .pi-subagents/
 
+# Campaign project-local runtime artifacts
+.pi/campaign-runs/
+
 # Node
 node_modules/
 dist/
 build/
+coverage/
 *.log
 
 # macOS
