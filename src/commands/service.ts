@@ -142,12 +142,12 @@ export class CampaignService {
       for (let attempt = 0; attempt < 3; attempt++) {
         const nodeId = attempt === 0 ? "campaign-generator" : `campaign-generator-repair-${attempt}`;
         await store.append("node.scheduled", { nodeId, attempt: attempt + 1 });
-        const run = await kernel.spawn({ agent: "context-builder", task: prompt, cwd: ctx.cwd, model: decision.model, phase: "Generate", label: `generator-${attempt + 1}`, outputPath: join(store.runDir, "subagents", `${nodeId}.txt`) });
+        const run = await kernel.spawn({ agent: "scout", task: prompt, cwd: ctx.cwd, model: decision.model, phase: "Generate", label: `generator-${attempt + 1}`, outputPath: join(store.runDir, "subagents", `${nodeId}.txt`), acceptance: { level: "none", reason: "Generator output is validated by the restricted Campaign compiler." }, turnBudget: { maxTurns: 4, graceTurns: 1 }, toolBudget: { soft: 10, hard: 16, block: ["read", "grep", "find", "ls"] } });
         bootstrap.currentRun = run; bootstrap.currentNodeId = nodeId;
         await store.append("node.started", { nodeId, kernelRunId: run.id, asyncDir: run.asyncDir, countAgent: false });
         const status = await this.wait(run, kernel);
         await this.recordUsage(store, run.id, status);
-        if (status.state !== "complete") throw new Error(status.error ?? `Generator kernel ${status.state}`);
+        if (status.state !== "complete") { const error = status.error ?? `Generator kernel ${status.state}`; await store.append("node.failed", { nodeId, error }); throw new Error(error); }
         const output = status.output;
         await store.append("node.completed", { nodeId, output });
         source = extractCampaignSource(output);

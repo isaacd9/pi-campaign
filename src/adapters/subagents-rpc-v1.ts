@@ -13,7 +13,7 @@ export class SubagentsRpcV1Kernel implements CampaignKernel {
     // RPC v1 validates against the public single-agent schema. It cannot carry
     // phase/label/thinking/outputSchema for a solo spawn, so those stay in the
     // campaign record rather than being sent as unsupported private fields.
-    const data = await this.call("spawn", { agent: assignment.agent, task: assignment.task, cwd: assignment.cwd, context: "fresh", async: true, clarify: false, model: assignment.model, output, acceptance: assignment.acceptance, timeoutMs: assignment.timeoutMs });
+    const data = await this.call("spawn", { agent: assignment.agent, task: assignment.task, cwd: assignment.cwd, context: "fresh", async: true, clarify: false, model: assignment.model, output, acceptance: assignment.acceptance, turnBudget: assignment.turnBudget, toolBudget: assignment.toolBudget, timeoutMs: assignment.timeoutMs });
     const details = (data as { details?: { asyncId?: string; asyncDir?: string } }).details;
     if (!details?.asyncId) throw new Error("pi-subagents spawn reply omitted asyncId.");
     this.spawnedAt.set(details.asyncId, Date.now());
