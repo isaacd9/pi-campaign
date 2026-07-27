@@ -142,7 +142,7 @@ export class CampaignService {
       for (let attempt = 0; attempt < 3; attempt++) {
         const nodeId = attempt === 0 ? "campaign-generator" : `campaign-generator-repair-${attempt}`;
         await store.append("node.scheduled", { nodeId, attempt: attempt + 1 });
-        const run = await kernel.spawn({ agent: "scout", task: prompt, cwd: ctx.cwd, model: decision.model, phase: "Generate", label: `generator-${attempt + 1}`, outputPath: join(store.runDir, "subagents", `${nodeId}.txt`), acceptance: { level: "none", reason: "Generator output is validated by the restricted Campaign compiler." }, turnBudget: { maxTurns: 4, graceTurns: 1 }, toolBudget: { soft: 10, hard: 16, block: ["read", "grep", "find", "ls"] } });
+        const run = await kernel.spawn({ agent: "scout", task: prompt, cwd: ctx.cwd, model: decision.model, phase: "Generate", label: `generator-${attempt + 1}`, outputPath: join(store.runDir, "subagents", `${nodeId}.txt`), acceptance: { level: "none", reason: "Generator output is validated by the restricted Campaign compiler." }, turnBudget: { maxTurns: 2, graceTurns: 1 }, toolBudget: { hard: 1, block: "*" } });
         bootstrap.currentRun = run; bootstrap.currentNodeId = nodeId;
         await store.append("node.started", { nodeId, kernelRunId: run.id, asyncDir: run.asyncDir, countAgent: false });
         const status = await this.wait(run, kernel);
