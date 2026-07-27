@@ -5,8 +5,8 @@ type Method = "ping" | "spawn" | "status" | "interrupt" | "stop";
 interface Reply { version: 1; requestId: string; success: boolean; data?: unknown; error?: { code: string; message: string } }
 export class SubagentsRpcV1Kernel implements CampaignKernel {
   readonly worktreeIsolation = false;
-  private disposed = false; private pending = new Set<() => void>();
-  constructor(private events: EventBus, private timeoutMs = 5_000) {}
+  private disposed = false; private pending = new Set<() => void>(); private spawnedAt = new Map<string, number>();
+  constructor(private events: EventBus, private timeoutMs = 5_000, private startupGraceMs = 30_000) {}
   async ping(): Promise<{ version: number; methods: string[] }> { const data = await this.call("ping", {}) as { version: number; methods: string[] }; return data; }
   async spawn(assignment: KernelAssignment): Promise<KernelRun> {
     const output = assignment.outputPath ?? `${assignment.cwd}/.pi/campaign-runs/${Date.now()}-${Math.random().toString(36).slice(2)}.output.txt`;
@@ -16,12 +16,32 @@ export class SubagentsRpcV1Kernel implements CampaignKernel {
     const data = await this.call("spawn", { agent: assignment.agent, task: assignment.task, cwd: assignment.cwd, context: "fresh", async: true, clarify: false, model: assignment.model, output, acceptance: assignment.acceptance, timeoutMs: assignment.timeoutMs });
     const details = (data as { details?: { asyncId?: string; asyncDir?: string } }).details;
     if (!details?.asyncId) throw new Error("pi-subagents spawn reply omitted asyncId.");
+    this.spawnedAt.set(details.asyncId, Date.now());
     return { id: details.asyncId, ...(details.asyncDir ? { asyncDir: details.asyncDir } : {}), outputPath: output };
   }
-  async status(run: KernelRun): Promise<KernelStatus> { if (run.asyncDir) { try { return await readSubagentStatus(run.asyncDir, run.outputPath); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; } } const data = await this.call("status", { id: run.id }); return statusFromRpc(data); }
+  async status(run: KernelRun): Promise<KernelStatus> {
+    if (run.asyncDir) {
+      try {
+        const status = await readSubagentStatus(run.asyncDir, run.outputPath);
+        if (!["queued", "running"].includes(status.state)) this.spawnedAt.delete(run.id);
+        return status;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        const spawnedAt = this.spawnedAt.get(run.id);
+        // RPC spawn can reply after creating asyncDir but just before its runner
+        // atomically publishes status.json. Querying RPC status in this window
+        // returns a misleading hard failure and leaves the launched child orphaned.
+        if (spawnedAt !== undefined && Date.now() - spawnedAt < this.startupGraceMs) return { state: "queued" };
+      }
+    }
+    const data = await this.call("status", { id: run.id });
+    const status = statusFromRpc(data);
+    if (!["queued", "running"].includes(status.state)) this.spawnedAt.delete(run.id);
+    return status;
+  }
   async interrupt(run: KernelRun): Promise<void> { await this.call("interrupt", { id: run.id, ...(run.asyncDir ? { dir: run.asyncDir } : {}) }); }
   async stop(run: KernelRun): Promise<void> { await this.call("stop", { id: run.id, ...(run.asyncDir ? { dir: run.asyncDir } : {}) }); }
-  dispose(): void { this.disposed = true; for (const cancel of this.pending) cancel(); this.pending.clear(); }
+  dispose(): void { this.disposed = true; for (const cancel of this.pending) cancel(); this.pending.clear(); this.spawnedAt.clear(); }
   private call(method: Method, params: unknown): Promise<unknown> {
     if (this.disposed) return Promise.reject(new Error("pi-subagents RPC adapter disposed")); const requestId = `campaign-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     return new Promise((resolve, reject) => {
